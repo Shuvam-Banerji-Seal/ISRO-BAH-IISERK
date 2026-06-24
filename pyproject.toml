@@ -1,0 +1,20 @@
+[project]
+name = "isro-bah-iiserk"
+version = "0.1.0"
+description = "BAH 2026 — Challenge 15: Solar Flare Forecasting/Nowcasting using Aditya-L1 SoLEXS & HEL1OS data"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "matplotlib>=3.9",
+    "pandas>=2.2",
+    "h5py>=3.11",
+    "netCDF4>=1.7",
+    "astropy>=6.0",
+    "scikit-learn>=1.5",
+    "torch>=2.3",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+bah2026 = "main:main"

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Playwright artifacts
+.playwright-mcp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data downloads
+data/downloads/*.zip
+
+# IDE
+.vscode/
+.idea/
