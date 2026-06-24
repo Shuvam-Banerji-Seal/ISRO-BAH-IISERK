@@ -17,4 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-bah2026 = "main:main"
+bah2026 = "bah2026.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

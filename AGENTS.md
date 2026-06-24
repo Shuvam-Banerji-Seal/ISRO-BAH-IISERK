@@ -109,12 +109,14 @@ isro-bah-iiserk/
 │       ├── SoLEXS_UserManual.pdf
 │       └── HEL1OS_UserManual.pdf
 ├── notebooks/             # Jupyter notebooks for exploration
-├── src/                   # Source code
-│   ├── __init__.py
-│   ├── data/              # Data loading & preprocessing
-│   ├── features/          # Feature engineering
-│   ├── models/            # ML models (nowcasting + forecasting)
-│   └── visualization/     # Dashboard & plotting
+├── src/
+│   └── bah2026/           # Main package
+│       ├── __init__.py
+│       ├── main.py        # Entry point
+│       ├── data/          # Data loading & preprocessing
+│       ├── features/      # Feature engineering
+│       ├── models/        # ML models (nowcasting + forecasting)
+│       └── visualization/ # Dashboard & plotting
 └── tests/                 # Unit tests
 ```
 
