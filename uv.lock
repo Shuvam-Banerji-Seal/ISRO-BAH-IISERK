@@ -310,7 +310,7 @@ wheels = [
 [[package]]
 name = "isro-bah-iiserk"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "astropy" },
     { name = "h5py" },

@@ -19,5 +19,12 @@ dependencies = [
 [project.scripts]
 bah2026 = "bah2026.main:main"
 
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = true
+
 [tool.setuptools.packages.find]
 where = ["src"]

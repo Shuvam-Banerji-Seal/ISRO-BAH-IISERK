@@ -18,6 +18,15 @@ Thumbs.db
 # Data downloads
 data/downloads/*.zip
 
+# Raw satellite data (downloaded from PRADAN, large zips)
+data/raw/
+
+# Stray files from PRADAN keepalive
+payload.xhtml
+
+# Temp download stubs
+/tmp/download_*.sh
+
 # IDE
 .vscode/
 .idea/
