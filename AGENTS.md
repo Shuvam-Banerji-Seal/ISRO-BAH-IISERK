@@ -79,48 +79,157 @@ The PRADAN portal uses a Java/PrimeFaces frontend with Keycloak SSO authenticati
 
 ### Data Format
 
-**SoLEXS Level-1** (OGIP/HEASARC FITS format):
-- Daily files: `AL1_SLX_L1_YYYYMMDD_v1.0.zip`
-- Each zip contains 2 detectors (SDD1, SDD2) with:
-  - `*_L1.lc.gz` — Light curve (binned counts vs time) — **primary data for nowcasting**
-  - `*_L1.pi.gz` — Pulse Invariant spectrum (counts vs energy channel)
-  - `*_L1.gti.gz` — Good Time Intervals
-- Energy range: 2–22 keV (soft X-rays)
-- Cadence: 1-second spectra
+#### SoLEXS Level-1 (Soft X-rays: 2–22 keV)
 
-**HEL1OS Level-1** (FITS format):
-- Per-orbit files: `HLS_YYYYMMDD_HHMMSS_XXXXXsec_lev1_V*.zip`
-- Each zip contains:
-  - `czt/lightcurve_czt*.fits` — CZT detector light curves (20–150 keV)
-  - `czt/hel1os_czt_spectra_*.fits` — CZT spectra
-  - `cdte/lightcurve_cdte*.fits` — CdTe detector light curves (10–40 keV)
-  - `cdte/hel1os_cdte_spectra_*.fits` — CdTe spectra
-  - `events/evt.fits` — Full event list (large, ~180 MB)
-  - `aux/` — Housekeeping, GTI files
-- Energy range: 10–150 keV (hard X-rays)
+**Files:** `AL1_SLX_L1_YYYYMMDD_v1.0.zip` → ~6 MB each, one per day (750 files, 2024-04 to 2026-06)
+
+**Naming convention:**
+```
+AL1_SLX_L1_YYYYMMDD_v1.0.zip
+  └── AL1_SLX_L1_YYYYMMDD_v1.0/
+      ├── SDD1/
+      │   └── AL1_SOLEXS_YYYYMMDD_SDD1_L1.gti.gz    (~1 KB)
+      └── SDD2/
+          ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.lc.gz      (~250 KB)  — light curve
+          ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.pi.gz      (~5.8 MB)  — PI spectrum
+          └── AL1_SOLEXS_YYYYMMDD_SDD2_L1.gti.gz     (~1 KB)
+```
+
+**Detectors:**
+| Detector | Data Products | Notes |
+|----------|---------------|-------|
+| SDD1     | GTI only      | Silicon Drift Detector 1 (aperture 7.1 mm²) |
+| SDD2     | LC + PI + GTI | Silicon Drift Detector 2 (aperture 0.1 mm², for high-flux) |
+
+**Light Curve (`_L1.lc` — FITS OGIP/HEASARC format):**
+- **HDUs:** 2 (Primary + `RATE` BinTable)
+- **Rows:** 86,400 (one per second for full day)
+- **Columns:**
+  | Column | Type | Unit | Description |
+  |--------|------|------|-------------|
+  | `TIME` | float64 | s | Mission elapsed time (TSTART-based) |
+  | `COUNTS` | float64 | — | Binned count rate |
+- **Key headers:** `TSTART`, `TSTOP`, `TELESCOP=AL1`, `INSTRUME=SoLEXS`
+
+**PI Spectrum (`_L1.pi` — FITS OGIP/HEASARC format):**
+- **HDUs:** 2 (Primary + `SPECTRUM` BinTable)
+- **Rows:** 86,400 (one spectrum per second)
+- **Energy channels:** 340 bins (2–22 keV, ~0.059 keV/channel)
+- **Columns:**
+  | Column | Type | Shape | Unit | Description |
+  |--------|------|-------|------|-------------|
+  | `TSTART` | float64 | scalar | s | Start time of spectrum |
+  | `TELAPSE` | float64 | scalar | s | Elapsed time |
+  | `SPEC_NUM` | int32 | scalar | — | Spectrum sequence number |
+  | `CHANNEL` | int32 | (340,) | — | Energy channel array (0–339) |
+  | `COUNTS` | float64 | (340,) | — | Counts per channel |
+  | `EXPOSURE` | float64 | scalar | s | Exposure time |
+- **Key headers:** `DETCHANS=340`
+
+**Good Time Intervals (`_L1.gti`):**
+- **HDUs:** 2 (Primary + `GTI` BinTable)
+- **Rows:** Typically 1–3 (gaps from Earth occultation)
+- **Columns:** `START` (float64), `STOP` (float64)
+
+---
+
+#### HEL1OS Level-1 (Hard X-rays: 10–150 keV)
+
+**Files:** `HLS_YYYYMMDD_HHMMSS_XXXXXsec_lev1_V*.zip` → ~300 MB each, per-orbit (2,537 files, 2023-11 to 2026-06)
+
+**Naming convention:**
+```
+HLS_YYYYMMDD_HHMMSS_XXXXXsec_lev1_V111.zip
+  │          │       │            │
+  │          │       │            └── pipeline version (V111, V112, V211, etc.)
+  │          │       └── orbit duration in seconds
+  │          └── start time (HHMMSS UT)
+  └── date
+```
+
+**Extracted light curves (primary data for nowcasting):**
+| File | Detector | Energy Range | Size |
+|------|----------|-------------|------|
+| `lightcurve_czt{1,2}.fits` | CZT (20–150 keV) | 5 bands | 11 MB each |
+| `lightcurve_cdte{1,2}.fits` | CdTe (10–40 keV) | 5 bands | 11 MB each |
+
+**Light Curve structure (both CZT and CdTe):**
+- **HDUs:** 6 (Primary + 5 energy-band BinTables)
+- **Rows per HDU:** ~42,500 (1-second cadence, ~12 hours per orbit)
+- **Columns (each HDU):**
+  | Column | Type | Unit | Description |
+  |--------|------|------|-------------|
+  | `MJD` | float64 | MJD | Modified Julian Date |
+  | `ISOT` | string(30) | UT | ISO-8601 timestamp |
+  | `CTR` | float64 | cts/sec | Count rate |
+  | `STAT_ERR` | float64 | cts/sec | Statistical error (√N) |
+
+**CZT energy bands (HDU 1–5):**
+| HDU | EXTNAME | Energy Range |
+|-----|---------|-------------|
+| 1 | `CZT1_LC_BAND_20.00KEV_TO_40.00KEV` | 20–40 keV |
+| 2 | `CZT1_LC_BAND_40.00KEV_TO_60.00KEV` | 40–60 keV |
+| 3 | `CZT1_LC_BAND_60.00KEV_TO_80.00KEV` | 60–80 keV |
+| 4 | `CZT1_LC_BAND_80.00KEV_TO_150.00KEV` | 80–150 keV |
+| 5 | `CZT1_LC_BAND_18.00KEV_TO_160.00KEV` | **Full band** |
+
+**CdTe energy bands (HDU 1–5):**
+| HDU | EXTNAME | Energy Range |
+|-----|---------|-------------|
+| 1 | `CDTE1_LC_BAND_5.00KEV_TO_20.00KEV` | 5–20 keV |
+| 2 | `CDTE1_LC_BAND_20.00KEV_TO_30.00KEV` | 20–30 keV |
+| 3 | `CDTE1_LC_BAND_30.00KEV_TO_40.00KEV` | 30–40 keV |
+| 4 | `CDTE1_LC_BAND_40.00KEV_TO_60.00KEV` | 40–60 keV |
+| 5 | `CDTE1_LC_BAND_1.80KEV_TO_90.00KEV` | **Full band** |
+
+**Spectra (secondary):**
+- CZT: 341 energy channels, 20-second accumulation per spectrum
+- CdTe: 511 energy channels, 20-second accumulation per spectrum
+- ~2,126 spectra per orbit
+
+**Event files (`evt.fits` — ~180 MB each, NOT extracted to save space):**
+- Contains per-photon events (~2.8 million per orbit)
+- 4 tables: CDTE1-EVENTS, CDTE2-EVENTS, CZT1-EVENTS, CZT2-EVENTS
+- Columns: mjd, hlsobt, currtemp, chn, ener (keV), recnum, utc-isot (+ pix, offsetchn for CZT)
+
+**Housekeeping (`hk.fits`):**
+- 5,722 rows, 62 columns
+- Includes detector temperatures, count rates, HV monitor, sun position, pile-up/saturation counters
+
+**Good Time Intervals (`gti*.fits`):**
+- 1 row per detector (single contiguous good interval per orbit)
+- Columns: `tstart`, `tstop`
+
+---
+
+### Extraction Status
+
+| Dataset | Raw Zips | Processed Days | Extracted Files | Size |
+|---------|----------|---------------|-----------------|------|
+| SoLEXS  | 750      | 747           | 2,990           | 330 GB |
+| HEL1OS  | 2,537    | 927           | 9,091           | 88 GB  |
+| **Total** | **3,287** | **1,674**   | **12,081**      | **~530 GB** |
+
+> **Note:** SoLEXS has 747 unique days from 750 zips (3 are version upgrades v1.0 → v1.1 for the same day). HEL1OS has 927 unique days from 2,537 zips (multiple orbits per day, plus different pipeline versions for the same orbit).
 
 ### Processed Data Structure
 
-After decompression, data is organized as:
-
 ```
 data/processed/
-├── solexs/
-│   └── YYYY/MM/DD/
-│       ├── SDD1/
-│       │   └── AL1_SOLEXS_YYYYMMDD_SDD1_L1.gti
-│       └── SDD2/
-│           ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.lc
-│           ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.pi
-│           └── AL1_SOLEXS_YYYYMMDD_SDD2_L1.gti
-└── hel1os/
-    └── YYYY/MM/DD/
-        ├── lightcurve_czt1.fits  (and czt2)
-        ├── lightcurve_cdte1.fits (and cdte2)
-        ├── hel1os_czt_spectra_*.fits
-        ├── hel1os_cdte_spectra_*.fits
-        ├── hk.fits
-        └── gti*.fits
+├── solexs/YYYY/MM/DD/
+│   ├── SDD1/
+│   │   └── AL1_SOLEXS_YYYYMMDD_SDD1_L1.gti          (GTI, ~8 KB)
+│   └── SDD2/
+│       ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.lc           (light curve, ~1.3 MB)
+│       ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.pi           (spectrum, ~450 MB)
+│       └── AL1_SOLEXS_YYYYMMDD_SDD2_L1.gti          (GTI, ~8 KB)
+│
+└── hel1os/YYYY/MM/DD/
+    ├── lightcurve_czt{1,2}.fits                      (CZT LC, 11 MB each)
+    ├── lightcurve_cdte{1,2}.fits                     (CdTe LC, 11 MB each)
+    ├── hel1os_czt_spectra_czt{1,2}.fits              (CZT spectra, 14 MB each)
+    ├── hel1os_cdte_spectra_cdte{1,2}.fits            (CdTe spectra, 21 MB each)
+    └── czt{1,2}dispix.txt                            (detector config, 0 KB)
 ```
 
 ---
