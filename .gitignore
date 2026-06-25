@@ -30,3 +30,6 @@ payload.xhtml
 # IDE
 .vscode/
 .idea/
+
+# Processed data (extracted from raw zips)
+data/processed/

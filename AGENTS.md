@@ -39,10 +39,89 @@ This challenge requires participants to build an automated algorithmic pipeline 
 ## Dataset
 
 **Primary Data:**
-- Aditya-L1 SoLEXS (Level-1) data — accessible via ISRO ISSDC PRADAN portal
-- Aditya-L1 HEL1OS (Level-1) data — accessible via ISRO ISSDC PRADAN portal
+- Aditya-L1 SoLEXS (Level-1) data — downloaded from ISRO ISSDC PRADAN portal
+- Aditya-L1 HEL1OS (Level-1) data — downloaded from ISRO ISSDC PRADAN portal
 
 **Supplementary:** Participants may use any other open datasets.
+
+### Data Download Process
+
+Data was acquired via the ISSDC PRADAN portal (https://pradan1.issdc.gov.in):
+
+1. **Account:** Registered at ISSDC Keycloak SSO (`sbs22ms076` / IISER Kolkata)
+2. **Browse:** Navigated to Aditya-L1 → Browse and Download → SoLEXS/HEL1OS
+3. **URL Collection:** Scraped all download URLs across all pages (8 pages for SoLEXS, 26 for HEL1OS) at 100 rows/page
+4. **Download:** Used parallel wget workers (8×) with session cookies extracted from the authenticated browser session
+5. **Rate Limits:** PRADAN enforces session download limits — downloads paused at ~600 files, resumed after rate limit reset (~1 hr)
+6. **Cleanup:** Removed OAuth redirect artefacts and duplicate files (`.1`, `.2` suffixes)
+
+### Download Summary
+
+| Dataset | Files | Size (compressed) |
+|---------|-------|-------------------|
+| SoLEXS  | 750   | ~4.5 GB           |
+| HEL1OS  | 2,537 | ~760 GB           |
+| **Total** | **3,287** | **~765 GB** |
+
+### Download Methodology
+
+The PRADAN portal uses a Java/PrimeFaces frontend with Keycloak SSO authentication. Standard `wget`/`curl` downloads fail because the session is browser-bound (Keycloak session cookies are tied to the specific TLS/HTTP2 session). The solution:
+
+1. **Browser Automation:** Used Playwright (headless Chromium) for all authenticated interactions — URL collection, cookie extraction, and file downloads via `page.request.get()` (Playwright's HTTP client which shares the browser's authenticated session).
+
+2. **Cookie Refresh:** A Python cookie grabber periodically extracts fresh cookies from the browser session and saves to `/tmp/pradan_cookie.txt`. The parallel download workers re-read this file to maintain session validity.
+
+3. **Parallel Workers:** 8 concurrent `wget` workers share the same cookie, downloading independent URL chunks. Each worker refreshes its cookie after every 30 downloads.
+
+4. **Server Rate Limiting:** The PRADAN server enforces session download limits. After ~600 rapid downloads the server returns HTTP 500 errors. The rate limit resets after approximately 1 hour. A retry loop automatically resumes downloads.
+
+5. **Resilience:** The download manager uses `wget -nc` (no-clobber) so already-downloaded files are automatically skipped on retry. Failed downloads (302/500) are retried with exponential backoff.
+
+### Data Format
+
+**SoLEXS Level-1** (OGIP/HEASARC FITS format):
+- Daily files: `AL1_SLX_L1_YYYYMMDD_v1.0.zip`
+- Each zip contains 2 detectors (SDD1, SDD2) with:
+  - `*_L1.lc.gz` — Light curve (binned counts vs time) — **primary data for nowcasting**
+  - `*_L1.pi.gz` — Pulse Invariant spectrum (counts vs energy channel)
+  - `*_L1.gti.gz` — Good Time Intervals
+- Energy range: 2–22 keV (soft X-rays)
+- Cadence: 1-second spectra
+
+**HEL1OS Level-1** (FITS format):
+- Per-orbit files: `HLS_YYYYMMDD_HHMMSS_XXXXXsec_lev1_V*.zip`
+- Each zip contains:
+  - `czt/lightcurve_czt*.fits` — CZT detector light curves (20–150 keV)
+  - `czt/hel1os_czt_spectra_*.fits` — CZT spectra
+  - `cdte/lightcurve_cdte*.fits` — CdTe detector light curves (10–40 keV)
+  - `cdte/hel1os_cdte_spectra_*.fits` — CdTe spectra
+  - `events/evt.fits` — Full event list (large, ~180 MB)
+  - `aux/` — Housekeeping, GTI files
+- Energy range: 10–150 keV (hard X-rays)
+
+### Processed Data Structure
+
+After decompression, data is organized as:
+
+```
+data/processed/
+├── solexs/
+│   └── YYYY/MM/DD/
+│       ├── SDD1/
+│       │   └── AL1_SOLEXS_YYYYMMDD_SDD1_L1.gti
+│       └── SDD2/
+│           ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.lc
+│           ├── AL1_SOLEXS_YYYYMMDD_SDD2_L1.pi
+│           └── AL1_SOLEXS_YYYYMMDD_SDD2_L1.gti
+└── hel1os/
+    └── YYYY/MM/DD/
+        ├── lightcurve_czt1.fits  (and czt2)
+        ├── lightcurve_cdte1.fits (and cdte2)
+        ├── hel1os_czt_spectra_*.fits
+        ├── hel1os_cdte_spectra_*.fits
+        ├── hk.fits
+        └── gti*.fits
+```
 
 ---
 
@@ -52,6 +131,7 @@ This challenge requires participants to build an automated algorithmic pipeline 
 - Python (NumPy, SciPy, Pandas, Matplotlib)
 - PyTorch / scikit-learn for ML models
 - HDF5 / netCDF4 for data handling
+- Astropy / SunPy for FITS data handling and solar physics
 - Any other open-source tools
 
 ---
@@ -95,13 +175,26 @@ isro-bah-iiserk/
 ├── AGENTS.md              # This file — problem statement & guidance
 ├── README.md              # Project overview
 ├── pyproject.toml         # Python project config & dependencies
-├── main.py                # Entry point
 ├── .gitignore
 ├── .python-version
 ├── data/
 │   ├── downloads/         # Download scripts for SoLEXS & HEL1OS
 │   │   ├── download_solexs.sh
-│   │   └── download_hel1os.sh
+│   │   ├── download_hel1os.sh
+│   │   ├── fetch_all_data.sh     # URL collector via PrimeFaces AJAX
+│   │   ├── parallel_dl.sh        # 8-worker parallel wget downloader
+│   │   ├── fast_dl.py            # Python 10-worker urllib downloader
+│   │   ├── cookie_grabber.py     # Cookie extraction & refresh
+│   │   ├── download_manager.sh   # Sequential auto-retry downloader
+│   │   ├── bulk_dl.py            # Python persistent downloader
+│   │   ├── bulk_dl_browser.py    # Playwright browser-based downloader
+│   │   └── decompress.sh         # Decompress zips to data/processed/
+│   ├── raw/               # Raw downloaded zip files (gitignored)
+│   │   ├── solexs/        # 750 zip files
+│   │   └── hel1os/        # 2,537 zip files
+│   ├── processed/         # Decompressed data (gitignored)
+│   │   ├── solexs/        # Organized by YYYY/MM/DD/
+│   │   └── hel1os/        # Organized by YYYY/MM/DD/
 │   └── tools/             # SoLEXS processing tools
 │       └── solexs_tools-1.1.tar.gz
 ├── docs/
@@ -129,12 +222,29 @@ uv sync
 uv run bah2026
 ```
 
-## Data Download
+### Download Scripts
 
-1. Log in to https://pradan1.issdc.gov.in
-2. Copy the session cookie into `data/downloads/download_solexs.sh` and `data/downloads/download_hel1os.sh`
-3. Run:
-```bash
-bash data/downloads/download_solexs.sh
-bash data/downloads/download_hel1os.sh
+Additional scripts in `data/downloads/`:
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_all_data.sh` | Bash: collect all URLs via PrimeFaces AJAX API |
+| `parallel_dl.sh` | Bash: 8-worker parallel wget downloader |
+| `fast_dl.py` | Python: 10-worker parallel urllib downloader |
+| `cookie_grabber.py` | Python: extract/refresh browser cookies |
+| `decompress.sh` | Bash: decompress zips into structured `data/processed/` |
+| `bulk_download.sh` | Bash: sequential download manager with auto-retry |
 ```
+
+### Download Scripts
+
+Additional scripts in `data/downloads/`:
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_all_data.sh` | Bash: collect all URLs via PrimeFaces AJAX API |
+| `parallel_dl.sh` | Bash: 8-worker parallel wget downloader |
+| `fast_dl.py` | Python: 10-worker parallel urllib downloader |
+| `cookie_grabber.py` | Python: extract/refresh browser cookies |
+| `decompress.sh` | Bash: decompress zips into structured `data/processed/` |
+| `bulk_download.sh` | Bash: sequential download manager with auto-retry |
