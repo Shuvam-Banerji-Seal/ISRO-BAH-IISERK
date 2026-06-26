@@ -343,17 +343,32 @@ Additional scripts in `data/downloads/`:
 | `cookie_grabber.py` | Python: extract/refresh browser cookies |
 | `decompress.sh` | Bash: decompress zips into structured `data/processed/` |
 | `bulk_download.sh` | Bash: sequential download manager with auto-retry |
-```
 
-### Download Scripts
+---
 
-Additional scripts in `data/downloads/`:
+## Data Analysis Notes
 
-| Script | Purpose |
-|--------|---------|
-| `fetch_all_data.sh` | Bash: collect all URLs via PrimeFaces AJAX API |
-| `parallel_dl.sh` | Bash: 8-worker parallel wget downloader |
-| `fast_dl.py` | Python: 10-worker parallel urllib downloader |
-| `cookie_grabber.py` | Python: extract/refresh browser cookies |
-| `decompress.sh` | Bash: decompress zips into structured `data/processed/` |
-| `bulk_download.sh` | Bash: sequential download manager with auto-retry |
+See `docs/analysis/` for detailed findings:
+
+- `notes_solexs.md` — SoLEXS data exploration (747 days, SDD2 primary, 100% integrity)
+- `notes_hel1os.md` — HEL1OS data exploration (902 days, 25 empty dirs from corrupted zips)
+- `01_data_exploration.md` — FITS loading, feature extraction, flare detection
+- `02_nowcasting_pipeline.md` — Real-time flare detection architecture
+- `03_forecasting_pipeline.md` — Predictive model design (LightGBM + CNN-LSTM)
+- `04_visualization_dashboard.md` — Streamlit dashboard, plots, alert system
+
+### Key Findings
+
+**SoLEXS (747 days, 2024-02-01 to 2026-06-22):**
+- SDD2 is the primary science detector (LC: 1.33 MB/day, PI: 450 MB/day)
+- SDD1 is non-functional (empty GTI files only)
+- 100% FITS integrity, no corruption
+- Major gap: June 2024 (30 days missing)
+- 126 total missing days (85.8% coverage)
+
+**HEL1OS (902 days, 2023-11-30 to 2026-06-23):**
+- 10 files/day: 4 lightcurves (11 MB each), 4 spectra, 2 dispix txt
+- 100% FITS integrity on extracted files
+- 25 empty directories from corrupted raw zips (need re-download)
+- 10 isolated single-day gaps
+- Combined energy coverage: 1.8–160 keV
