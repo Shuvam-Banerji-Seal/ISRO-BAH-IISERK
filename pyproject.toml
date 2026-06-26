@@ -16,6 +16,7 @@ dependencies = [
     "tqdm>=4.66",
     "requests>=2.34.2",
     "websockets>=16.0",
+    "playwright>=1.60.0",
 ]
 
 [project.scripts]

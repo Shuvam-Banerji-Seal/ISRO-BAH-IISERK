@@ -350,25 +350,82 @@ Additional scripts in `data/downloads/`:
 
 See `docs/analysis/` for detailed findings:
 
-- `notes_solexs.md` — SoLEXS data exploration (747 days, SDD2 primary, 100% integrity)
-- `notes_hel1os.md` — HEL1OS data exploration (902 days, 25 empty dirs from corrupted zips)
-- `01_data_exploration.md` — FITS loading, feature extraction, flare detection
-- `02_nowcasting_pipeline.md` — Real-time flare detection architecture
-- `03_forecasting_pipeline.md` — Predictive model design (LightGBM + CNN-LSTM)
-- `04_visualization_dashboard.md` — Streamlit dashboard, plots, alert system
+| Document | Content |
+|----------|---------|
+| `notes_solexs.md` | SoLEXS deep-dive: 747 days, SDD2 primary, 100% integrity, 126 gaps |
+| `notes_hel1os.md` | HEL1OS deep-dive: 902 days, 25 empty dirs, 7216 FITS files |
+| `solexs_inventory.md` | Full SoLEXS inventory: headers, shapes, sizes, gaps |
+| `hel1os_inventory.md` | Full HEL1OS inventory: bands, spectra, gaps, detectors |
+| `combined_coverage.md` | Temporal overlap: 724 days dual-instrument coverage |
+| `01_data_exploration.md` | FITS loading, feature extraction, flare detection algorithms |
+| `02_nowcasting_pipeline.md` | Real-time flare detection architecture |
+| `03_forecasting_pipeline.md` | Predictive model design (LightGBM + CNN-LSTM) |
+| `04_visualization_dashboard.md` | Streamlit dashboard, plots, alert system |
 
-### Key Findings
+---
 
-**SoLEXS (747 days, 2024-02-01 to 2026-06-22):**
-- SDD2 is the primary science detector (LC: 1.33 MB/day, PI: 450 MB/day)
-- SDD1 is non-functional (empty GTI files only)
-- 100% FITS integrity, no corruption
-- Major gap: June 2024 (30 days missing)
-- 126 total missing days (85.8% coverage)
+## Database Summary
 
-**HEL1OS (902 days, 2023-11-30 to 2026-06-23):**
-- 10 files/day: 4 lightcurves (11 MB each), 4 spectra, 2 dispix txt
-- 100% FITS integrity on extracted files
-- 25 empty directories from corrupted raw zips (need re-download)
-- 10 isolated single-day gaps
-- Combined energy coverage: 1.8–160 keV
+### SoLEXS — Soft X-ray Light Curves (2–22 keV)
+
+| Metric | Value |
+|--------|-------|
+| Date range | **2024-02-01 → 2026-06-22** (873 calendar days) |
+| Days with data | **747** (85.6% coverage) |
+| Missing days | **126** (largest gap: entire June 2024 = 30 days) |
+| Raw zips | 750 (747 unique days; 3 dates have v1.0+v1.1 upgrades) |
+| FITS files | **2,988** (100% integrity — zero corruption) |
+| Disk usage | **330 GB** processed |
+| Primary detector | **SDD2** (LC: 1.39 MB/day, PI: ~472 MB/day) |
+| Secondary detector | SDD1 (GTI only, non-functional) |
+| LC rows per day | **86,400** (1-second cadence, full 24h) |
+| LC file size | 1.39 MB (fixed, zero variance) |
+| PI channels | **340** (2–22 keV, ~0.059 keV/channel) |
+| PI rows | **86,400** (one spectrum per second) |
+| Orphaned raw zips | **0** — perfect raw↔processed mapping |
+
+### HEL1OS — Hard X-ray Light Curves (1.8–160 keV)
+
+| Metric | Value |
+|--------|-------|
+| Date range | **2023-11-30 → 2026-06-23** (937 calendar days) |
+| Days with data | **927** (98.9% coverage) |
+| Missing days | **10** (all single-day gaps) |
+| Empty directories | **25** (from corrupted raw zips) |
+| Raw zips | 2,537 (multiple orbits per day) |
+| FITS files | **7,272** (100% integrity) |
+| Disk usage | **87.6 GB** processed |
+| Files per day | **10** (4 lightcurves + 4 spectra + 2 dispix txt) |
+| Lightcurve cadence | **1 second** (~42,500 rows per orbit) |
+| Spectra accumulation | 20 seconds (~2,126 spectra per orbit) |
+| CZT energy bands | 20–40, 40–60, 60–80, 80–150, 18–160 keV |
+| CdTe energy bands | 5–20, 20–30, 30–40, 40–60, 1.8–90 keV |
+| Combined range | **1.8–160 keV** |
+| Detectors | 4 (CZT1, CZT2, CdTe1, CdTe2) |
+| Orphaned raw zips | **0** — perfect raw↔processed mapping |
+
+### Combined Coverage
+
+| Metric | Value |
+|--------|-------|
+| Overlap period | **2024-02-01 → 2026-06-22** (814 days) |
+| Days with BOTH instruments | **724** (78.3% of all data days) |
+| SoLEXS-only days | 23 (2.5%) — mostly late 2023 before SoLEXS launch |
+| HEL1OS-only days | 178 (19.0%) — pre-SoLEXS + June 2024 gap |
+| Days with neither | 12 (1.3%) — single-day gaps |
+| Longest dual streak | **57 days** (2024-07-03 → 2024-08-28) |
+| SoLEXS cadence | 1s (full 24h/day) |
+| HEL1OS cadence | 1s (~5.7h/day average) |
+| Combined energy coverage | **1.8–160 keV** |
+
+### Data Quality Summary
+
+| Check | Result |
+|-------|--------|
+| SoLEXS FITS integrity | **2,988/2,988 = 100.00%** |
+| HEL1OS FITS integrity | **7,272/7,272 = 100.00%** |
+| PI DETCHANS verified | **340** (all 3 samples) |
+| CZT DETCHANS verified | **341** |
+| CdTe DETCHANS verified | **511** |
+| LC rows uniform | **86,400/day** (SoLEXS, all 747 files) |
+| Raw↔Processed mapping | **0 orphans** (both datasets) |
