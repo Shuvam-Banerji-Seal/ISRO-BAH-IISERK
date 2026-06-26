@@ -346,6 +346,18 @@ Additional scripts in `data/downloads/`:
 
 ---
 
+## Research & Implementation Plan
+
+See `docs/PLAN.md` for the comprehensive research plan covering:
+
+- **Rigorous Literature Review** — 60+ papers across solar flare physics, ML/DL forecasting, hard X-ray imaging spectroscopy, and Aditya-L1 instruments
+- **Mathematical Formulations** — Neupert effect, bremsstrahlung emission, thick-target model, GOES classification, ML loss functions, transformer attention
+- **Novel Contributions** — 8 novel research directions never before attempted with combined soft+hard X-ray data
+- **GPU-Optimized Implementation** — PyTorch Lightning with distributed training on A100-80GB, mixed precision, custom CUDA extensions
+- **Data Analysis & Visualization Products** — HDF5 databases, PDF plot catalogs, interactive Streamlit dashboard
+
+---
+
 ## Data Analysis Notes
 
 See `docs/analysis/` for detailed findings:

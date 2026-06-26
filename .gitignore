@@ -36,3 +36,15 @@ data/processed/
 
 # Compressed archives
 data/raw_*.tar.xz
+
+# Pipeline logs
+logs/
+
+# Generated config
+bah2026_config.json
+
+# Output artifacts
+output/
+
+# Test cache
+.pytest_cache/
