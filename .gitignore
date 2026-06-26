@@ -33,3 +33,6 @@ payload.xhtml
 
 # Processed data (extracted from raw zips)
 data/processed/
+
+# Compressed archives
+data/raw_*.tar.xz
