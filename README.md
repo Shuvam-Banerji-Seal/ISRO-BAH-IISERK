@@ -1,70 +1,99 @@
 # ISRO-BAH-IISERK
 
-**Bharatiya Antariksh Hackathon 2026 — Challenge 15**  
+**Bharatiya Antariksh Hackathon 2026 — Challenge 15**
 *Forecasting and Nowcasting of Solar Flares using combined Soft and Hard X-ray data from Aditya-L1*
 
-**Team:** IISER Kolkata  
-**Organizers:** ISRO × Hack2skill
+**Team:** IISER Kolkata | **Organizers:** ISRO × Hack2skill
 
 ---
 
 ## Overview
 
-This repository contains the solution for Challenge 15 of the Bharatiya Antariksh Hackathon 2026. We build an automated algorithmic pipeline using time-series data from Aditya-L1's SoLEXS (soft X-ray) and HEL1OS (hard X-ray) payloads to detect and predict solar flares.
+Automated pipeline combining **SoLEXS** (soft X-rays, 2–22 keV, 340 channels) and **HEL1OS** (hard X-rays, 1.8–160 keV, 10 bands) from Aditya-L1 to detect and predict solar flares.
 
-## Database Summary
-
-| Dataset | Coverage | Days | Files | Size |
-|---------|----------|------|-------|------|
-| **SoLEXS** | 2–22 keV | 747 days | 2,988 FITS | 330 GB |
-| **HEL1OS** | 1.8–160 keV | 902 days | 7,272 FITS | 88 GB |
-| **Overlap** | Combined | **724 days** | — | — |
-
-**SoLEXS:** 1-second cadence, full 24h/day, 340 energy channels (2–22 keV)  
-**HEL1OS:** 1-second cadence, 4 detectors × 5 energy bands (1.8–160 keV)
-
-## Project Structure
-
-```
-├── AGENTS.md                   # Full problem statement & guidance
-├── README.md                   # This file
-├── pyproject.toml              # Python 3.13 + dependencies
-├── main.py                     # Entry point
-├── data/
-│   ├── downloads/              # PRADAN download scripts
-│   │   ├── download_solexs.sh
-│   │   ├── download_hel1os.sh
-│   │   ├── parallel_dl.sh     # 8-worker parallel downloader
-│   │   ├── fast_dl.py         # Python urllib downloader
-│   │   ├── cookie_grabber.py  # Browser cookie extraction
-│   │   └── decompress.sh      # Zip extraction to processed/
-│   └── tools/
-│       └── solexs_tools-1.1.tar.gz
-├── docs/
-│   ├── manuals/                # Instrument user manuals
-│   └── analysis/               # Data analysis & pipeline plans
-├── src/bah2026/                # Main package
-├── notebooks/                  # Jupyter notebooks
-└── tests/                      # Unit tests
-```
+**Key result:** 8,861 flare events detected across 724 days (Feb 2024 – Jun 2026).
 
 ## Quick Start
 
 ```bash
-uv sync
-uv run bah2026
+uv sync                          # install dependencies
+bah2026 all                      # run full pipeline
+bah2026 nowcast                  # flare detection only
+bah2026 features                 # feature extraction only
+bah2026 forecast                 # model training only
+pytest tests/ -v                 # run 50 tests
+bah2026 init-config              # generate bah2026_config.json
 ```
 
-## Key Documentation
+## Package Structure
 
-- `AGENTS.md` — Problem statement, data format, database summary
-- `docs/analysis/notes_solexs.md` — SoLEXS data analysis (747 days, 100% integrity)
-- `docs/analysis/notes_hel1os.md` — HEL1OS data analysis (902 days, 100% integrity)
-- `docs/analysis/combined_coverage.md` — Temporal overlap (724 dual-instrument days)
-- `docs/analysis/01_data_exploration.md` — FITS loading, feature extraction
-- `docs/analysis/02_nowcasting_pipeline.md` — Real-time flare detection
-- `docs/analysis/03_forecasting_pipeline.md` — Predictive model (LightGBM + CNN-LSTM)
-- `docs/analysis/04_visualization_dashboard.md` — Dashboard & alerts
+```
+src/bah2026/
+├── config.py              # All parameters via config (no hardcoding)
+├── main.py                # CLI entry point with multiprocessing
+├── data/
+│   ├── reader.py          # FITS loaders for SoLEXS + HEL1OS
+│   ├── preprocessing.py   # Background subtraction, temporal alignment
+│   └── hdf5_builder.py    # HDF5 database creation
+├── features/
+│   └── engineering.py     # 42 canonical features per window
+├── models/
+│   ├── nowcasting.py      # Threshold, Bayesian Blocks, Wavelet detection
+│   └── forecasting.py     # LightGBM, XGBoost, CatBoost, CNN-LSTM
+└── visualization/
+    └── plots.py           # 8 publication-quality plot functions
+```
+
+## Database
+
+| Dataset | Energy | Days | Cadence | FITS Integrity |
+|---------|--------|------|---------|----------------|
+| SoLEXS | 2–22 keV | 747 | 1s | 100% |
+| HEL1OS | 1.8–160 keV | 927 | 1s | 100% |
+| **Combined** | **1.8–160 keV** | **724** | 1s | 100% |
+
+## Nowcast Results
+
+| Metric | Value |
+|--------|-------|
+| Flares detected | 8,861 |
+| Days with flares | 640 / 724 (88.4%) |
+| HXR-confirmed | 3,454 (39.0%) |
+| Class B | 5,502 (62.1%) |
+| Class C | 2,955 (33.3%) |
+| Class M | 128 (1.4%) |
+
+## Configuration
+
+All parameters are configurable — no hardcoded values:
+
+```bash
+bah2026 init-config              # generate config file
+BAH2026_WORKERS=16 bah2026 all   # override parallelism
+BAH2026_DATA=/path bah2026 all   # override data location
+```
+
+See `docs/RESULTS.md` for detailed analysis and inferences.
+
+## Documentation
+
+| Document | Content |
+|----------|---------|
+| `AGENTS.md` | Problem statement, data format, database summary |
+| `docs/PLAN.md` | Research plan, mathematical framework, architecture |
+| `docs/RESULTS.md` | Analysis results and inferences |
+| `docs/IMPLEMENTED.md` | Implementation status vs plan |
+| `docs/analysis/` | Data exploration, pipeline designs, coverage analysis |
+| `docs/research/` | Literature review (5 research notes) |
+
+## Tests
+
+50 tests covering config, data loading, preprocessing, feature extraction, and model inference:
+
+```bash
+pytest tests/ -v
+# ======================== 50 passed in 12s ========================
+```
 
 ## License
 
