@@ -43,6 +43,12 @@ data/raw_*.tar.xz
 # Pipeline logs
 logs/
 
+# CatBoost training artifacts
+catboost_info/
+
+# External data downloads (GOES, etc.)
+data/external/
+
 # Generated config
 bah2026_config.json
 

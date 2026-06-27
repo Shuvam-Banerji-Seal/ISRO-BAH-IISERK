@@ -210,6 +210,8 @@ HLS_YYYYMMDD_HHMMSS_XXXXXsec_lev1_V111.zip
 | HEL1OS  | 2,537    | 927           | 9,091           | 88 GB  |
 | **Total** | **3,287** | **1,674**   | **12,081**      | **~530 GB** |
 
+> **HEL1OS coverage correction:** The 5.7 h/day figure below is incorrect. After multi-orbit concatenation (see `data/downloads/concat_orbits.py`), HEL1OS provides **mean 10.3 h/day, median 12.0 h/day** per extracted orbit (one orbit surviving per day in the original extraction; after concatenation, coverage can reach 12–16 h/day for most days with multiple orbits). The 5.7 h figure resulted from a per-raw-orbit calculation that did not account for the actual orbit lengths in the processed data.
+
 > **Note:** SoLEXS has 747 unique days from 750 zips (3 are version upgrades v1.0 → v1.1 for the same day). HEL1OS has 927 unique days from 2,537 zips (multiple orbits per day, plus different pipeline versions for the same orbit).
 
 ### Processed Data Structure
@@ -427,7 +429,7 @@ See `docs/analysis/` for detailed findings:
 | Days with neither | 12 (1.3%) — single-day gaps |
 | Longest dual streak | **57 days** (2024-07-03 → 2024-08-28) |
 | SoLEXS cadence | 1s (full 24h/day) |
-| HEL1OS cadence | 1s (~5.7h/day average) |
+| HEL1OS cadence (single orbit) | 1s (~10.3h/day avg, 12h median; after multi-orbit concat: up to 16h) |
 | Combined energy coverage | **1.8–160 keV** |
 
 ### Data Quality Summary

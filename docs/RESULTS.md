@@ -3,6 +3,20 @@
 **Solar Flare Nowcasting & Forecasting with Aditya-L1 SoLEXS + HEL1OS**
 
 ---
+> **⚠️ v0 results (below) are from the original pipeline which had critical methodology flaws.
+> These have been fixed in v1 (see `docs/IMPLEMENTED.md` for changelog).
+> The v0 catalogue (8,861 events, 0 X-class, TSS 0.11–0.15) was produced by:
+>   - A noise-catching 4σ MAD threshold on uncalibrated residuals (median duration 15 s)
+>   - A fabricated GOES scale (X6.3 labeled M2.8 — 22× error)
+>   - SXR-only detection (no HXR detection — HEL1OS was a post-hoc flag only)
+>   - Shuffled train/test split (data leakage invalidated the forecast benchmark)
+>
+> **v1 pipeline fixes (re-run required for corrected results):**
+>   - SWPC onset algorithm (4-min monotonic rise, half-decay end, ≥C1 threshold)
+>   - Real SoLEXS→GOES calibration via `src/bah2026/data/calibration.py`
+>   - Independent HEL1OS detection + coincidence merging
+>   - Chronological day-based train/val/test split
+>   - Ground-truth validation against SWPC GOES flare events
 
 ## 1. Dataset Summary
 

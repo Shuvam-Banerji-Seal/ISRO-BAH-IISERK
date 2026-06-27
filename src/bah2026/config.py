@@ -30,7 +30,10 @@ SOLEXS_ENERGY_KEV = (2.0, 22.0)
 SOLEXS_CHANNELS = 340
 SOLEXS_CADENCE_SEC = 1
 SOLEXS_ROWS_PER_DAY = 86_400
-SOLEXS_TO_GOES_SCALE = 1e-8
+# Calibration: SoLEXS→GOES is now handled by data/calibration.py
+# The old SOLEXS_TO_GOES_SCALE = 1e-8 was physically wrong (fabricated constant)
+# and produced a 22× error on the X6.3 flare (labeled M2.8).
+# Use data.calibration.solexs_counts_to_irradiance_simple() instead.
 
 CZT_BANDS: dict[str, tuple[float, float]] = {
     "CZT1_LC_BAND_20.00KEV_TO_40.00KEV": (20, 40),
@@ -51,7 +54,7 @@ CDTE_BANDS: dict[str, tuple[float, float]] = {
 # ── Nowcasting Parameters ────────────────────────────────────────────────
 
 NOWCAST_THRESHOLD_SIGMA = 4.0
-NOWCAST_MIN_DURATION_SEC = 10
+NOWCAST_MIN_DURATION_SEC = 240  # SWPC standard: 4-minute minimum duration
 NOWCAST_BAYESIAN_BLOCKS_SIGMA = 3.5
 NOWCAST_WAVELET_SIGMA = 3.5
 NOWCAST_BACKGROUND_WINDOW_SEC = 600
@@ -98,12 +101,18 @@ USE_GPU = os.environ.get("BAH2026_GPU", "auto")
 
 # ── Functions ────────────────────────────────────────────────────────────
 
+
 def ensure_output_dirs() -> None:
     """Create all output subdirectories."""
     for d in [
-        PLOTS_OVERVIEW, PLOTS_SPECTRAL, PLOTS_NOWCAST,
-        PLOTS_FORECAST, PLOTS_STATISTICS,
-        CATALOGS_DIR, MODELS_DIR, HDF5_DIR,
+        PLOTS_OVERVIEW,
+        PLOTS_SPECTRAL,
+        PLOTS_NOWCAST,
+        PLOTS_FORECAST,
+        PLOTS_STATISTICS,
+        CATALOGS_DIR,
+        MODELS_DIR,
+        HDF5_DIR,
     ]:
         d.mkdir(parents=True, exist_ok=True)
 

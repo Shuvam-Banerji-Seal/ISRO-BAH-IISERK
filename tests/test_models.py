@@ -4,17 +4,26 @@ import numpy as np
 import pytest
 
 from bah2026.models.nowcasting import (
-    background_subtract_simple, detect_flares_threshold,
-    detect_flares_bayesian_blocks, classify_flare_goes,
+    background_subtract_simple,
+    detect_flares_threshold,
+    detect_flares_bayesian_blocks,
+    classify_flare_goes,
 )
 from bah2026.config import (
-    NOWCAST_THRESHOLD_SIGMA, NOWCAST_MIN_DURATION_SEC,
-    NOWCAST_BAYESIAN_BLOCKS_SIGMA, NOWCAST_BACKGROUND_WINDOW_SEC,
-    SOLEXS_TO_GOES_SCALE,
+    NOWCAST_THRESHOLD_SIGMA,
+    NOWCAST_MIN_DURATION_SEC,
+    NOWCAST_BAYESIAN_BLOCKS_SIGMA,
+    NOWCAST_BACKGROUND_WINDOW_SEC,
 )
+
+# Calibration: solexs_counts_to_irradiance_simple(counts) = counts * 5.0e-9 W/m²
+# GOES thresholds: X >= 1e-4, M >= 1e-5, C >= 1e-6, B >= 1e-7
+# So: X at 20000 cts, M at 2000 cts, C at 200 cts, B at 20 cts
+_CAL = 5.0e-9  # FLUX_PER_COUNT in calibration.py
 
 
 # ── Nowcasting tests ────────────────────────────────────────────────────
+
 
 def test_background_subtract_simple():
     counts = np.ones(1000) * 10.0
@@ -85,21 +94,23 @@ def test_detect_flares_bayesian_blocks_no_event():
 
 
 def test_classify_flare_goes():
-    assert classify_flare_goes(1e4) == "X"
-    assert classify_flare_goes(1e3) == "M"
-    assert classify_flare_goes(1e2) == "C"
-    assert classify_flare_goes(1e1) == "B"
-    assert classify_flare_goes(1e0) == "A"
+    # Calibrated: 20000 cts → X, 2000 → M, 200 → C, 20 → B, <20 → A
+    assert classify_flare_goes(20000.0) == "X"
+    assert classify_flare_goes(2000.0) == "M"
+    assert classify_flare_goes(200.0) == "C"
+    assert classify_flare_goes(20.0) == "B"
+    assert classify_flare_goes(5.0) == "A"
 
 
 def test_classify_flare_goes_boundary():
-    flux_x = 1e-4 / SOLEXS_TO_GOES_SCALE
+    flux_x = 1e-4 / _CAL
     assert classify_flare_goes(flux_x) == "X"
-    flux_m = 1e-5 / SOLEXS_TO_GOES_SCALE
+    flux_m = 1e-5 / _CAL
     assert classify_flare_goes(flux_m) == "M"
 
 
 # ── Forecasting model tests ─────────────────────────────────────────────
+
 
 @pytest.fixture
 def sample_data():
@@ -113,6 +124,7 @@ def sample_data():
 def test_lgbm_forecaster(sample_data):
     X, y = sample_data
     from bah2026.models.forecasting import FlareForecasterLightGBM
+
     model = FlareForecasterLightGBM(n_estimators=50, scale_pos_weight=5.0)
     model.fit(X[:150], y[:150])
     prob = model.predict_proba(X[150:])
@@ -126,6 +138,7 @@ def test_lgbm_forecaster(sample_data):
 def test_xgb_forecaster(sample_data):
     X, y = sample_data
     from bah2026.models.forecasting import FlareForecasterXGBoost
+
     model = FlareForecasterXGBoost(n_estimators=50, scale_pos_weight=5.0)
     model.fit(X[:150], y[:150])
     prob = model.predict_proba(X[150:])
@@ -137,6 +150,7 @@ def test_xgb_forecaster(sample_data):
 def test_catboost_forecaster(sample_data):
     X, y = sample_data
     from bah2026.models.forecasting import FlareForecasterCatBoost
+
     model = FlareForecasterCatBoost(iterations=50)
     model.fit(X[:150], y[:150])
     prob = model.predict_proba(X[150:])
@@ -150,6 +164,7 @@ def test_cnnlstm_forecaster(sample_data):
     X_seq = np.random.randn(50, 12, 100).astype(np.float32)
     y_seq = np.random.randint(0, 2, 50).astype(np.float32)
     from bah2026.models.forecasting import FlareForecasterCNNLSTM
+
     model = FlareForecasterCNNLSTM(input_len=100, n_channels=12)
     model.fit(X_seq, y_seq, epochs=2, batch_size=16)
     prob = model.predict_proba(X_seq)

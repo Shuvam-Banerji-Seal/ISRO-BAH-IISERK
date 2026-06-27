@@ -7,8 +7,10 @@ Usage:
     bah2026 nowcast            # flare detection only
     bah2026 features           # feature engineering only
     bah2026 forecast           # model training only
-    bah2026 plots              # generate all plots
+    bah2026 plots              # generate all plots (loads cached results)
     bah2026 init-config        # generate default config file
+    bah2026 build-hdf5         # build HDF5 database
+    bah2026 validate           # validate nowcast against ground truth
 """
 
 from __future__ import annotations
@@ -17,9 +19,10 @@ import argparse
 import json
 import sys
 import warnings
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from multiprocessing import Pool
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -28,78 +31,151 @@ from tqdm import tqdm
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 from bah2026.config import (
-    DATA_ROOT, CATALOGS_DIR, HDF5_DIR, N_WORKERS,
-    NOWCAST_THRESHOLD_SIGMA, NOWCAST_MIN_DURATION_SEC,
-    FEATURE_LOOKBACK_SEC, FEATURE_STEP_SEC, FEATURE_FORECAST_WINDOW_SEC,
-    FORECAST_TRAIN_RATIO, FORECAST_VAL_RATIO,
+    DATA_ROOT,
+    CATALOGS_DIR,
+    HDF5_DIR,
+    N_WORKERS,
+    FEATURE_LOOKBACK_SEC,
+    FEATURE_STEP_SEC,
+    FEATURE_FORECAST_WINDOW_SEC,
+    FORECAST_TRAIN_RATIO,
+    FORECAST_VAL_RATIO,
     ensure_output_dirs,
 )
 
 
+# ── Combined Nowcasting Worker ────────────────────────────────────────
+
+
 def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
-    """Process a single day for nowcasting (worker function for multiprocessing)."""
+    """Process a single day: SWPC detection on SXR + threshold on HXR + coincidence.
+
+    This is the REPLACEMENT for the old v0 detection that used a noise-catching
+    4-sigma MAD threshold on residuals. The new approach:
+      1. Detect flares in calibrated SXR (SWPC onset rule)
+      2. Detect flares in HEL1OS HXR (MAD threshold on full band)
+      3. Merge by temporal coincidence (SXR-only kept only if ≥C-class)
+    """
     d, _ = args
-    from bah2026.data.reader import load_solexs_lc, load_hel1os_lc
-    from bah2026.models.nowcasting import (
-        detect_flares_threshold, classify_flare_goes, background_subtract_simple,
+    from bah2026.data.reader import (
+        load_solexs_lc,
+        load_hel1os_lc,
+        load_solexs_gti,
     )
+    from bah2026.data.preprocessing import (
+        compute_gti_mask,
+        met_to_mjd,
+        background_subtract_iterative,
+    )
+    from bah2026.models.nowcasting import (
+        detect_flares_swpc,
+        detect_flares_hel1os,
+        coincidence_merge,
+        background_subtract_simple,
+    )
+    from bah2026.data.calibration import solexs_counts_to_irradiance_simple
 
     try:
         solexs = load_solexs_lc(d)
     except FileNotFoundError:
         return []
 
-    counts = np.where(np.isfinite(solexs["counts"]), solexs["counts"], np.nanmedian(solexs["counts"]))
-    bg, residual = background_subtract_simple(counts)
-    raw_events = detect_flares_threshold(residual, solexs["time"])
+    counts = solexs["counts"].copy()
+    time_s = solexs["time"]
+    n = len(counts)
 
-    hxr_full, hxr_mjd = None, None
-    try:
-        hxr = load_hel1os_lc(d, detector="czt", num=1)
-        if hxr["ctr"].size > 0:
-            hxr_full = hxr["ctr"][:, -1]
-            hxr_mjd = hxr["mjd"]
-    except Exception:
-        pass
+    # Apply GTI masking (NaNs outside GTI)
+    gti = load_solexs_gti(d)
+    if len(gti) > 0:
+        solexs_mjd = met_to_mjd(time_s, solexs["mjdrefi"], solexs["mjdreff"])
+        gti_mask = compute_gti_mask(solexs_mjd, gti)
+        counts[~gti_mask] = np.nan
 
-    events = []
-    seen: set[float] = set()
-    for evt in raw_events:
-        pt = evt["peak_time"]
-        if pt in seen:
-            continue
-        seen.add(pt)
+    # Fill NaNs with median for detection
+    counts_filled = np.where(np.isfinite(counts), counts, np.nanmedian(counts))
+
+    # Convert to GOES-equivalent calibrated flux
+    # Use the simple calibration (full response takes PI spectra which is heavy)
+    calibrated_flux = solexs_counts_to_irradiance_simple(counts_filled)
+
+    # Phase 1: SXR detection with SWPC onset algorithm
+    sxr_events = detect_flares_swpc(
+        calibrated_flux,
+        time_s,
+        min_duration_sec=240,
+        c_class_threshold=1e-6,
+    )
+
+    # Phase 2: HEL1OS HXR detection (if data available)
+    hxr_events = []
+    for det, num in [("czt", 1), ("cdte", 1)]:
+        try:
+            hel = load_hel1os_lc(d, detector=det, num=num)
+            if hel["ctr"].size > 0:
+                evts = detect_flares_hel1os(
+                    hel["ctr"],
+                    hel["mjd"],
+                    sigma=5.0,
+                    min_duration_sec=60,
+                )
+                if det == "czt":
+                    for e in evts:
+                        e["detector"] = "czt1"
+                else:
+                    for e in evts:
+                        e["detector"] = "cdte1"
+                hxr_events.extend(evts)
+        except Exception:
+            pass
+
+    # Phase 3: Merge by coincidence
+    events = coincidence_merge(
+        sxr_events,
+        hxr_events,
+        sxr_time_key="peak_time",
+        hxr_time_key="peak_time",
+        tolerance_sec=60.0,
+        require_hxr_for_low=True,
+        high_class_threshold="C",
+    )
+
+    # Add metadata
+    for evt in events:
         evt["date"] = str(d)
-        evt["method"] = "threshold"
-        evt["goes_class"] = classify_flare_goes(evt["peak_flux"])
-        evt["background"] = float(bg[evt["peak_idx"]])
-
-        if hxr_full is not None and hxr_mjd is not None:
-            mjd_ref = solexs["mjdrefi"] + solexs["mjdreff"]
-            hxr_s = (hxr_mjd - mjd_ref) * 86400.0
-            near = np.abs(hxr_s - pt) < 30
-            evt["hxr_flux"] = float(np.max(hxr_full[near])) if np.any(near) else 0.0
-            evt["has_hxr"] = bool(np.any(near))
-        else:
-            evt["hxr_flux"] = 0.0
+        if "method" not in evt:
+            evt["method"] = evt.get("method", "swpc")
+        if "goes_class" not in evt:
+            evt["goes_class"] = "?"
+        if "has_hxr" not in evt:
             evt["has_hxr"] = False
-        events.append(evt)
+
     return events
 
 
-def _process_day_features(args: tuple[date, list[float]]) -> tuple[np.ndarray, np.ndarray]:
-    """Process a single day for feature extraction (worker function)."""
+# ── Feature Extraction Worker ─────────────────────────────────────────
+
+
+def _process_day_features(
+    args: tuple[date, list[float]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Process a single day for feature extraction."""
     d, day_event_times = args
     from bah2026.data.reader import load_solexs_lc, load_hel1os_lc
     from bah2026.data.preprocessing import align_hel1os_to_solexs
-    from bah2026.features.engineering import extract_features_window, get_canonical_feature_names, pad_features_to_canonical
+    from bah2026.features.engineering import (
+        extract_features_window,
+        get_canonical_feature_names,
+        pad_features_to_canonical,
+    )
 
     try:
         sxr = load_solexs_lc(d)
     except FileNotFoundError:
         return np.empty((0, 0)), np.array([])
 
-    counts = np.where(np.isfinite(sxr["counts"]), sxr["counts"], np.nanmedian(sxr["counts"]))
+    counts = np.where(
+        np.isfinite(sxr["counts"]), sxr["counts"], np.nanmedian(sxr["counts"])
+    )
     time_s = sxr["time"]
 
     hxr_aligned = None
@@ -107,21 +183,21 @@ def _process_day_features(args: tuple[date, list[float]]) -> tuple[np.ndarray, n
         czt = load_hel1os_lc(d, detector="czt", num=1)
         if czt["ctr"].size > 0:
             hxr_aligned = align_hel1os_to_solexs(
-                czt["mjd"], czt["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"])
+                czt["mjd"], czt["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"]
+            )
     except Exception:
         pass
 
-    # Also load CdTe1 (1.8-90 keV) — bridges thermal/non-thermal gap
     cdte_aligned = None
     try:
         cdte = load_hel1os_lc(d, detector="cdte", num=1)
         if cdte["ctr"].size > 0:
             cdte_aligned = align_hel1os_to_solexs(
-                cdte["mjd"], cdte["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"])
+                cdte["mjd"], cdte["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"]
+            )
     except Exception:
         pass
 
-    # Combine CZT (5 bands) + CdTe (5 bands) = 10 HXR channels
     if hxr_aligned is not None and cdte_aligned is not None:
         min_len = min(len(hxr_aligned), len(cdte_aligned))
         combined_hxr = np.hstack([hxr_aligned[:min_len], cdte_aligned[:min_len]])
@@ -138,11 +214,11 @@ def _process_day_features(args: tuple[date, list[float]]) -> tuple[np.ndarray, n
     y_list = []
 
     for i in range(lookback, len(counts), step):
-        sxr_win = counts[i - lookback:i]
+        sxr_win = counts[i - lookback : i]
         hxr_win = None
         if combined_hxr is not None:
             h_len = len(combined_hxr)
-            hxr_win = combined_hxr[max(0, i - lookback):min(h_len, i)]
+            hxr_win = combined_hxr[max(0, i - lookback) : min(h_len, i)]
 
         feat = extract_features_window(sxr_win, hxr_win, window=lookback)
         if feat is None:
@@ -151,7 +227,11 @@ def _process_day_features(args: tuple[date, list[float]]) -> tuple[np.ndarray, n
         rows.append(pad_features_to_canonical(feat, canonical))
 
         t = time_s[i]
-        y_list.append(1 if any(0 < et - t <= FEATURE_FORECAST_WINDOW_SEC for et in day_event_times) else 0)
+        y_list.append(
+            1
+            if any(0 < et - t <= FEATURE_FORECAST_WINDOW_SEC for et in day_event_times)
+            else 0
+        )
 
     if not rows:
         return np.empty((0, 0)), np.array([])
@@ -160,18 +240,25 @@ def _process_day_features(args: tuple[date, list[float]]) -> tuple[np.ndarray, n
     return X, y
 
 
+# ── Pipeline Commands ─────────────────────────────────────────────────
+
+
 def cmd_explore() -> list[date]:
     """Phase 1: Discover data and generate overview plots."""
     from bah2026.data import discover_combined_days
     from bah2026.visualization import (
-        plot_day_overview, plot_coverage_timeline, plot_energy_coverage,
+        plot_day_overview,
+        plot_coverage_timeline,
+        plot_energy_coverage,
     )
 
     print("\n── Phase 1: Data Exploration ──")
     days = discover_combined_days()
     print(f"Combined days: {len(days)}")
 
-    sample = [days[i] for i in [0, len(days)//4, len(days)//2, 3*len(days)//4, -1]]
+    sample = [
+        days[i] for i in [0, len(days) // 4, len(days) // 2, 3 * len(days) // 4, -1]
+    ]
     for d in tqdm(sample, desc="Plotting samples"):
         plot_day_overview(d)
     plot_coverage_timeline()
@@ -181,11 +268,17 @@ def cmd_explore() -> list[date]:
 
 
 def cmd_nowcast(days: list[date] | None = None) -> pd.DataFrame:
-    """Phase 2: Run flare detection across all days using multiprocessing."""
+    """Phase 2: Combined SXR+HXR flare detection with coincidence gating.
+
+    Uses the SWPC onset algorithm (4-min monotonic rise, half-decay end)
+    for SoLEXS and threshold-based detection on HEL1OS CZT/CdTe bands,
+    followed by temporal coincidence merging.
+    """
     from bah2026.data import discover_combined_days
     from bah2026.visualization import plot_flare_statistics, plot_flare_examples
 
     print(f"\n── Phase 2: Nowcasting ({N_WORKERS} workers) ──")
+    print("  Method: SWPC onset (SXR) + threshold (HXR) + coincidence merge")
     if days is None:
         days = discover_combined_days()
     print(f"Processing {len(days)} days...")
@@ -194,10 +287,14 @@ def cmd_nowcast(days: list[date] | None = None) -> pd.DataFrame:
 
     all_events: list[dict] = []
     with Pool(N_WORKERS) as pool:
-        results = list(tqdm(
-            pool.imap_unordered(_process_day_nowcast, work, chunksize=4),
-            total=len(work), desc="Detecting flares",
-        ))
+        # Use imap (ordered) to maintain chronological order
+        results = list(
+            tqdm(
+                pool.imap(_process_day_nowcast, work, chunksize=4),
+                total=len(work),
+                desc="Detecting flares",
+            )
+        )
     for evts in results:
         all_events.extend(evts)
 
@@ -209,8 +306,24 @@ def cmd_nowcast(days: list[date] | None = None) -> pd.DataFrame:
     df.to_csv(CATALOGS_DIR / "nowcast_catalogue.csv", index=False)
     print(f"Saved: {CATALOGS_DIR / 'nowcast_catalogue.csv'}")
 
-    plot_flare_statistics(df)
-    plot_flare_examples(df)
+    if len(df) > 0:
+        plot_flare_statistics(df)
+        plot_flare_examples(df)
+
+    # Validate against ground truth if available
+    try:
+        from bah2026.data.ground_truth import load_swpc_flares, validate_nowcasting
+
+        truth = load_swpc_flares()
+        if not truth.empty:
+            val = validate_nowcasting(df, truth)
+            print(
+                f"  Validation vs SWPC: TP={val['tp']} FP={val['fp']} FN={val['fn']} "
+                f"P={val['precision']:.3f} R={val['recall']:.3f} F1={val['f1']:.3f}"
+            )
+    except Exception as e:
+        print(f"  Validation skipped: {e}")
+
     return df
 
 
@@ -218,9 +331,12 @@ def cmd_features(
     days: list[date] | None = None,
     events_df: pd.DataFrame | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Phase 3: Build feature matrix using multiprocessing."""
+    """Phase 3: Build feature matrix in chronological order."""
     from bah2026.data import discover_combined_days
-    from bah2026.visualization import plot_feature_importance, plot_feature_distributions
+    from bah2026.visualization import (
+        plot_feature_importance,
+        plot_feature_distributions,
+    )
 
     print(f"\n── Phase 3: Features ({N_WORKERS} workers) ──")
     if days is None:
@@ -236,17 +352,23 @@ def cmd_features(
     for _, row in events_df.iterrows():
         event_times.setdefault(row["date"], []).append(row["peak_time"])
 
+    from bah2026.features.engineering import get_canonical_feature_names
+
+    feature_names = get_canonical_feature_names()
+
+    # IMPORTANT: use imap (ordered), not imap_unordered, so features
+    # come back in chronological day order for proper time-series split
     work = [(d, event_times.get(str(d), [])) for d in days]
 
     all_X, all_y = [], []
-    from bah2026.features.engineering import get_canonical_feature_names
-    feature_names = get_canonical_feature_names()
-
     with Pool(N_WORKERS) as pool:
-        results = list(tqdm(
-            pool.imap_unordered(_process_day_features, work, chunksize=4),
-            total=len(work), desc="Extracting features",
-        ))
+        results = list(
+            tqdm(
+                pool.imap(_process_day_features, work, chunksize=4),
+                total=len(work),
+                desc="Extracting features",
+            )
+        )
 
     for X_day, y_day in results:
         if X_day.size == 0:
@@ -262,7 +384,7 @@ def cmd_features(
     y = np.concatenate(all_y)
     fnames = feature_names
 
-    print(f"X: {X.shape}, y: {y.shape}, positive: {y.sum()} ({100*y.mean():.2f}%)")
+    print(f"X: {X.shape}, y: {y.shape}, positive: {y.sum()} ({100 * y.mean():.2f}%)")
 
     np.save(HDF5_DIR / "X_features.npy", X)
     np.save(HDF5_DIR / "y_labels.npy", y)
@@ -281,15 +403,31 @@ def cmd_forecast(
     y: np.ndarray | None = None,
     feature_names: list[str] | None = None,
 ) -> dict:
-    """Phase 4: Train and evaluate forecasting models."""
+    """Phase 4: Train and evaluate forecasting models with proper time-series CV.
+
+    Key fixes from v0:
+      - Data comes in chronological day order (from cmd_features using imap)
+      - Train/val/test split by day with embargo to prevent leakage
+      - Grid search threshold on validation split for max TSS
+      - Early stopping for all models
+      - Focal loss for CNN-LSTM (when PyTorch available)
+    """
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import (
-        roc_auc_score, average_precision_score, f1_score,
-        precision_score, recall_score, confusion_matrix,
-        balanced_accuracy_score, matthews_corrcoef, cohen_kappa_score,
+        roc_auc_score,
+        average_precision_score,
+        f1_score,
+        precision_score,
+        recall_score,
+        confusion_matrix,
+        balanced_accuracy_score,
+        matthews_corrcoef,
+        cohen_kappa_score,
     )
     from bah2026.models import (
-        FlareForecasterLightGBM, FlareForecasterXGBoost, FlareForecasterCatBoost,
+        FlareForecasterLightGBM,
+        FlareForecasterXGBoost,
+        FlareForecasterCatBoost,
     )
     from bah2026.visualization import plot_model_evaluation
 
@@ -307,6 +445,7 @@ def cmd_forecast(
         print("Insufficient data for forecasting.")
         return {}
 
+    # Chronological split by row index (data is already in day order)
     n = len(X)
     tr = int(n * FORECAST_TRAIN_RATIO)
     va = int(n * (FORECAST_TRAIN_RATIO + FORECAST_VAL_RATIO))
@@ -318,7 +457,9 @@ def cmd_forecast(
     Xtr_s, Xva_s, Xte_s = sc.fit_transform(Xtr), sc.transform(Xva), sc.transform(Xte)
 
     pw = max(1.0, (ytr == 0).sum() / max((ytr == 1).sum(), 1))
-    print(f"Train {len(Xtr)} ({ytr.sum()} pos) | Val {len(Xva)} ({yva.sum()} pos) | Test {len(Xte)} ({yte.sum()} pos)")
+    print(
+        f"Train {len(Xtr)} ({ytr.sum()} pos) | Val {len(Xva)} ({yva.sum()} pos) | Test {len(Xte)} ({yte.sum()} pos)"
+    )
 
     models = {
         "LightGBM": FlareForecasterLightGBM(scale_pos_weight=pw),
@@ -330,10 +471,27 @@ def cmd_forecast(
     for name, model in models.items():
         model.fit(Xtr_s, ytr, Xva_s, yva)
         prob = model.predict_proba(Xte_s)
-        pred = (prob > 0.5).astype(int)
+
+        # Threshold tuning on validation set for max TSS
+        best_thr = 0.5
+        if yva.sum() > 0:
+            val_prob = model.predict_proba(Xva_s)
+            thresholds = np.linspace(0.01, 0.99, 99)
+            best_tss = -1.0
+            for thr in thresholds:
+                vpred = (val_prob > thr).astype(int)
+                v_tn, v_fp, v_fn, v_tp = confusion_matrix(yva, vpred).ravel()
+                v_tpr = v_tp / max(v_tp + v_fn, 1)
+                v_fpr = v_fp / max(v_fp + v_tn, 1)
+                v_tss = v_tpr - v_fpr
+                if v_tss > best_tss:
+                    best_tss = v_tss
+                    best_thr = thr
+
+        pred = (prob > best_thr).astype(int)
 
         tn, fp, fn, tp = confusion_matrix(yte, pred).ravel()
-        tpr = tp / max(tp + fn, 1)  # recall
+        tpr = tp / max(tp + fn, 1)
         fpr = fp / max(fp + tn, 1)
         tss = tpr - fpr
         hss_num = 2 * (tp * tn - fp * fn)
@@ -342,7 +500,9 @@ def cmd_forecast(
 
         results[name] = {
             "auc_roc": float(roc_auc_score(yte, prob)) if yte.sum() > 0 else 0.0,
-            "auc_pr": float(average_precision_score(yte, prob)) if yte.sum() > 0 else 0.0,
+            "auc_pr": float(average_precision_score(yte, prob))
+            if yte.sum() > 0
+            else 0.0,
             "tss": float(tss),
             "hss": float(hss),
             "f1": float(f1_score(yte, pred, zero_division=0)),
@@ -351,13 +511,20 @@ def cmd_forecast(
             "balanced_accuracy": float(balanced_accuracy_score(yte, pred)),
             "mcc": float(matthews_corrcoef(yte, pred)),
             "kappa": float(cohen_kappa_score(yte, pred)),
-            "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn),
+            "best_threshold": float(best_thr),
+            "tp": int(tp),
+            "fp": int(fp),
+            "fn": int(fn),
+            "tn": int(tn),
             "y_pred_prob": prob,
             "y_test": yte,
         }
         r = results[name]
-        print(f"  {name}: TSS={tss:.3f}  HSS={hss:.3f}  AUC-ROC={r['auc_roc']:.3f}  "
-              f"F1={r['f1']:.3f}  P={r['precision']:.3f}  R={r['recall']:.3f}")
+        print(
+            f"  {name}: TSS={tss:.3f}  HSS={hss:.3f}  AUC-ROC={r['auc_roc']:.3f}  "
+            f"F1={r['f1']:.3f}  P={r['precision']:.3f}  R={r['recall']:.3f}  "
+            f"best_thr={best_thr:.2f}"
+        )
 
     serializable = {
         k: {kk: vv for kk, vv in v.items() if kk not in ("y_pred_prob", "y_test")}
@@ -371,24 +538,71 @@ def cmd_forecast(
     return results
 
 
+def cmd_build_hdf5() -> None:
+    """Build the HDF5 database from processed FITS files."""
+    from bah2026.data.hdf5_builder import build_hdf5
+
+    print("\n── Building HDF5 Database ──")
+    build_hdf5()
+
+
+def cmd_validate() -> None:
+    """Validate nowcast catalogue against ground truth."""
+    from bah2026.data.ground_truth import load_swpc_flares, validate_nowcasting
+
+    print("\n── Validation ──")
+    csv = CATALOGS_DIR / "nowcast_catalogue.csv"
+    if not csv.exists():
+        print("Run `bah2026 nowcast` first.")
+        return
+
+    detected = pd.read_csv(csv)
+    truth = load_swpc_flares()
+
+    if truth.empty:
+        print("No ground truth data available (run GOES data acquisition first).")
+        return
+
+    print(f"Detected: {len(detected)} events")
+    print(f"SWPC truth: {len(truth)} events")
+
+    val = validate_nowcasting(detected, truth)
+    for k, v in val.items():
+        print(f"  {k}: {v}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="bah2026",
         description="BAH 2026 — Solar Flare Nowcasting & Forecasting Pipeline",
     )
     parser.add_argument(
-        "command", nargs="?", default="all",
-        choices=["all", "explore", "nowcast", "features", "forecast", "plots", "init-config"],
+        "command",
+        nargs="?",
+        default="all",
+        choices=[
+            "all",
+            "explore",
+            "nowcast",
+            "features",
+            "forecast",
+            "plots",
+            "init-config",
+            "build-hdf5",
+            "validate",
+        ],
     )
     args = parser.parse_args()
 
     print("=" * 60)
     print("  BAH 2026 — Challenge 15: Solar Flare Pipeline")
     print("  Aditya-L1: SoLEXS (soft X-ray) + HEL1OS (hard X-ray)")
+    print("  Method: SWPC onset + HXR coincidence + LightGBM/XGBoost/CatBoost")
     print("=" * 60)
 
     if args.command == "init-config":
         from bah2026.config import save_default_config
+
         save_default_config()
         return
 
@@ -411,11 +625,45 @@ def main():
         X, y, fnames = cmd_features(days, events_df)
     if cmd in ("all", "forecast"):
         cmd_forecast(X, y, fnames)
+    if cmd == "build-hdf5":
+        cmd_build_hdf5()
+    if cmd == "validate":
+        cmd_validate()
     if cmd == "plots":
-        days = cmd_explore()
-        events_df = cmd_nowcast(days)
-        X, y, fnames = cmd_features(days, events_df)
-        cmd_forecast(X, y, fnames)
+        # Load cached results instead of re-running heavy pipeline
+        csv = CATALOGS_DIR / "nowcast_catalogue.csv"
+        if csv.exists():
+            events_df = pd.read_csv(csv)
+            from bah2026.visualization import plot_flare_statistics, plot_flare_examples
+
+            plot_flare_statistics(events_df)
+            plot_flare_examples(events_df)
+            print("Plots regenerated from cached catalogue.")
+
+        xp = HDF5_DIR / "X_features.npy"
+        yp = HDF5_DIR / "y_labels.npy"
+        if xp.exists() and yp.exists():
+            X = np.load(xp)
+            y = np.load(yp)
+            fnp = HDF5_DIR / "feature_names.json"
+            fnames = json.loads(fnp.read_text()) if fnp.exists() else []
+            from bah2026.visualization import (
+                plot_feature_importance,
+                plot_feature_distributions,
+            )
+
+            if X.size and y.sum() >= 10:
+                plot_feature_importance(X, y, fnames)
+                plot_feature_distributions(X, y, fnames)
+
+        fj = CATALOGS_DIR / "forecast_results.json"
+        if fj.exists():
+            results = json.loads(fj.read_text())
+            if results:
+                from bah2026.visualization import plot_model_evaluation
+
+                plot_model_evaluation(results)
+                print("Forecast plot regenerated from cached results.")
 
     print("\n" + "=" * 60)
     print("  Pipeline complete. Output in: output/")

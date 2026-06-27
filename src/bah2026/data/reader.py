@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 from multiprocessing import Pool
+from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
@@ -19,8 +20,16 @@ from bah2026.config import DATA_ROOT, CZT_BANDS, CDTE_BANDS, N_WORKERS
 
 # ── SoLEXS ──────────────────────────────────────────────────────────────
 
+
 def _solexs_dir(d: date) -> Path:
-    return DATA_ROOT / "solexs" / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}" / "SDD2"
+    return (
+        DATA_ROOT
+        / "solexs"
+        / f"{d.year:04d}"
+        / f"{d.month:02d}"
+        / f"{d.day:02d}"
+        / "SDD2"
+    )
 
 
 def load_solexs_lc(d: date) -> dict:
@@ -70,6 +79,7 @@ def load_solexs_gti(d: date) -> np.ndarray:
 
 
 # ── HEL1OS ──────────────────────────────────────────────────────────────
+
 
 def _hel1os_dir(d: date) -> Path:
     return DATA_ROOT / "hel1os" / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}"
@@ -137,6 +147,7 @@ def load_hel1os_spectra(d: date, detector: str = "czt", num: int = 1) -> dict:
 
 
 # ── Day discovery ───────────────────────────────────────────────────────
+
 
 def _check_solexs_day(path: Path) -> date | None:
     yd, md, dd = path.parent.parent.name, path.parent.name, path.name

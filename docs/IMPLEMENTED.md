@@ -1,7 +1,14 @@
 # IMPLEMENTED — BAH 2026 Challenge #15
 
-**Status:** Working pipeline skeleton with exploration, nowcasting, and forecasting complete.
-**Last updated:** 2026-06-27
+**Status:** v1 pipeline with corrected nowcasting (SWPC onset + HXR coincidence),
+               proper forecasting split, real GOES calibration, and Streamlit dashboard.
+**Last updated:** 2026-06-28
+
+> ⚠️ **v0 → v1 migration:** The original pipeline (v0) had critical methodology flaws:
+> - 8,861 "flares" was a noise catalogue (median duration 15 s, no X-class detected
+>   despite published X6.3, X-class mislabeled as M2.8 — 22× GOES scale error)
+> - Forecasting TSS 0.11–0.15 was untrustworthy (shuffled split, circular labels)
+> - v1 fixes all of these: SWPC onset, real calibration, HXR coincidence, proper CV
 
 ---
 

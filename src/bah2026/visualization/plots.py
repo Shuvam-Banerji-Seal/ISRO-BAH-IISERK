@@ -7,24 +7,34 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
 from bah2026.config import (
-    PLOTS_OVERVIEW, PLOTS_STATISTICS, PLOTS_NOWCAST, PLOTS_FORECAST,
-    CZT_BANDS, CDTE_BANDS,
+    PLOTS_OVERVIEW,
+    PLOTS_STATISTICS,
+    PLOTS_NOWCAST,
+    PLOTS_FORECAST,
+    CZT_BANDS,
+    CDTE_BANDS,
 )
 from bah2026.data.reader import (
-    load_solexs_lc, load_hel1os_lc,
-    discover_solexs_days, discover_hel1os_days,
+    load_solexs_lc,
+    load_hel1os_lc,
+    discover_solexs_days,
+    discover_hel1os_days,
 )
 from bah2026.data.preprocessing import background_subtract
 
 
 # ── Single-day overview ─────────────────────────────────────────────────
 
-def plot_day_overview(d: date, save: bool = True, show: bool = False) -> plt.Figure | None:
+
+def plot_day_overview(
+    d: date, save: bool = True, show: bool = False
+) -> plt.Figure | None:
     """Multi-panel plot: SoLEXS SXR + HEL1OS HXR + hardness ratio."""
     try:
         solexs = load_solexs_lc(d)
@@ -69,13 +79,62 @@ def plot_day_overview(d: date, save: bool = True, show: bool = False) -> plt.Fig
     if not has_hxr:
         for idx in (1, 2):
             ax = fig.add_subplot(gs[idx])
-            ax.text(0.5, 0.5, "No HEL1OS data", transform=ax.transAxes,
-                    ha="center", va="center", color="gray", fontsize=12)
+            ax.text(
+                0.5,
+                0.5,
+                "No HEL1OS data",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                color="gray",
+                fontsize=12,
+            )
 
     ax4 = fig.add_subplot(gs[3])
     ax4.set_xlabel("Time (hours from start)", fontsize=11)
-    ax4.set_ylabel("SXR/HXR Ratio", fontsize=10)
-    ax4.set_xlim(sxr_h[0], sxr_h[-1])
+    ax4.set_xlim(0, 24)
+
+    # Plot SXR/HXR or CZT/CdTe ratio
+    try:
+        czt = load_hel1os_lc(d, detector="czt", num=1)
+        cdte = load_hel1os_lc(d, detector="cdte", num=1)
+        if czt["ctr"].size > 0 and cdte["ctr"].size > 0:
+            # CZT/CdTe hardness ratio
+            czt_full = czt["ctr"][:, -1]
+            cdte_full = cdte["ctr"][:, -1]
+            min_len = min(len(czt_full), len(cdte_full))
+            ratio = np.where(
+                cdte_full[:min_len] > 0,
+                czt_full[:min_len] / cdte_full[:min_len],
+                np.nan,
+            )
+            t_r = (czt["mjd"][:min_len] - czt["mjd"][0]) * 24.0
+            ax4.plot(t_r, ratio, "g-", lw=0.3, alpha=0.7)
+            ax4.set_ylabel("CZT/CdTe Ratio")
+        else:
+            raise ValueError("No HXR data")
+    except Exception:
+        # Fallback: SXR/HXR ratio from SoLEXS (using background)
+        try:
+            bg, _ = background_subtract(counts)
+            bg_smooth = np.convolve(
+                counts / np.maximum(bg, 1), np.ones(60) / 60, mode="same"
+            )
+            ax4.plot(sxr_h, bg_smooth / np.max(bg_smooth), "g-", lw=0.5, alpha=0.7)
+            ax4.set_ylabel("Normalized SXR")
+            ax4.set_ylim(0, 5)
+        except Exception:
+            ax4.text(
+                0.5,
+                0.5,
+                "No ratio data",
+                transform=ax4.transAxes,
+                ha="center",
+                va="center",
+                color="gray",
+                fontsize=12,
+            )
+
     ax4.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -89,6 +148,7 @@ def plot_day_overview(d: date, save: bool = True, show: bool = False) -> plt.Fig
 
 # ── Coverage timeline ───────────────────────────────────────────────────
 
+
 def plot_coverage_timeline(save: bool = True, show: bool = False) -> plt.Figure:
     """Bar chart of SoLEXS / HEL1OS / combined daily availability."""
     solexs = set(discover_solexs_days())
@@ -99,15 +159,20 @@ def plot_coverage_timeline(save: bool = True, show: bool = False) -> plt.Figure:
         return fig
 
     all_dates = pd.date_range(
-        min(min(solexs, default=date(2099,1,1)), min(hel1os, default=date(2099,1,1))),
-        max(max(solexs, default=date(2000,1,1)), max(hel1os, default=date(2000,1,1))),
+        min(
+            min(solexs, default=date(2099, 1, 1)), min(hel1os, default=date(2099, 1, 1))
+        ),
+        max(
+            max(solexs, default=date(2000, 1, 1)), max(hel1os, default=date(2000, 1, 1))
+        ),
     )
     sx = [d.date() in solexs for d in all_dates]
     hx = [d.date() in hel1os for d in all_dates]
     both = [s and h for s, h in zip(sx, hx)]
 
-    fig, axes = plt.subplots(3, 1, figsize=(16, 6), sharex=True,
-                              gridspec_kw={"height_ratios": [1, 1, 1]})
+    fig, axes = plt.subplots(
+        3, 1, figsize=(16, 6), sharex=True, gridspec_kw={"height_ratios": [1, 1, 1]}
+    )
     for ax, mask, label, color in [
         (axes[0], sx, "SoLEXS", "blue"),
         (axes[1], hx, "HEL1OS", "red"),
@@ -121,7 +186,9 @@ def plot_coverage_timeline(save: bool = True, show: bool = False) -> plt.Figure:
     axes[-1].set_xlabel("Date")
     plt.tight_layout()
     if save:
-        fig.savefig(PLOTS_STATISTICS / "coverage_timeline.png", dpi=150, bbox_inches="tight")
+        fig.savefig(
+            PLOTS_STATISTICS / "coverage_timeline.png", dpi=150, bbox_inches="tight"
+        )
     if show:
         plt.show()
     plt.close(fig)
@@ -129,6 +196,7 @@ def plot_coverage_timeline(save: bool = True, show: bool = False) -> plt.Figure:
 
 
 # ── Energy coverage diagram ─────────────────────────────────────────────
+
 
 def plot_energy_coverage(save: bool = True, show: bool = False) -> plt.Figure:
     """Horizontal bar chart showing combined SoLEXS + HEL1OS energy coverage."""
@@ -153,11 +221,15 @@ def plot_energy_coverage(save: bool = True, show: bool = False) -> plt.Figure:
     ax.set_yticklabels([b[0] for b in bands], fontsize=8)
     ax.set_xlim(1, 200)
     ax.set_xscale("log")
-    ax.set_title("Combined Energy Coverage: 1.8–160 keV", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Combined Energy Coverage: 1.8–160 keV", fontsize=12, fontweight="bold"
+    )
     ax.grid(True, alpha=0.3, axis="x")
     plt.tight_layout()
     if save:
-        fig.savefig(PLOTS_STATISTICS / "energy_coverage.png", dpi=150, bbox_inches="tight")
+        fig.savefig(
+            PLOTS_STATISTICS / "energy_coverage.png", dpi=150, bbox_inches="tight"
+        )
     if show:
         plt.show()
     plt.close(fig)
@@ -166,7 +238,10 @@ def plot_energy_coverage(save: bool = True, show: bool = False) -> plt.Figure:
 
 # ── Nowcast catalogue statistics ────────────────────────────────────────
 
-def plot_flare_statistics(df: pd.DataFrame, save: bool = True, show: bool = False) -> plt.Figure:
+
+def plot_flare_statistics(
+    df: pd.DataFrame, save: bool = True, show: bool = False
+) -> plt.Figure:
     """Four-panel flare statistics from the nowcast catalogue."""
     class_colors = {"A": "blue", "B": "cyan", "C": "green", "M": "orange", "X": "red"}
 
@@ -175,18 +250,30 @@ def plot_flare_statistics(df: pd.DataFrame, save: bool = True, show: bool = Fals
     ax = axes[0, 0]
     cc = df["goes_class"].value_counts()
     ax.bar(cc.index, cc.values, color=[class_colors.get(c, "gray") for c in cc.index])
-    ax.set_xlabel("GOES Class"); ax.set_ylabel("Count"); ax.set_title("Flare Class Distribution")
+    ax.set_xlabel("GOES Class")
+    ax.set_ylabel("Count")
+    ax.set_title("Flare Class Distribution")
     ax.set_yscale("log")
 
     ax = axes[0, 1]
     for cls, color in class_colors.items():
         m = df["goes_class"] == cls
         if m.sum():
-            ax.scatter(df.loc[m, "peak_flux"], df.loc[m, "duration_sec"] / 60,
-                       c=color, alpha=0.5, s=15, label=cls)
-    ax.set_xlabel("Peak Flux (cts/s)"); ax.set_ylabel("Duration (min)")
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.legend(fontsize=8); ax.set_title("Duration vs Peak Flux"); ax.grid(True, alpha=0.3)
+            ax.scatter(
+                df.loc[m, "peak_flux"],
+                df.loc[m, "duration_sec"] / 60,
+                c=color,
+                alpha=0.5,
+                s=15,
+                label=cls,
+            )
+    ax.set_xlabel("Peak Flux (cts/s)")
+    ax.set_ylabel("Duration (min)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.legend(fontsize=8)
+    ax.set_title("Duration vs Peak Flux")
+    ax.grid(True, alpha=0.3)
 
     ax = axes[1, 0]
     dates = pd.to_datetime(df["date"])
@@ -195,13 +282,19 @@ def plot_flare_statistics(df: pd.DataFrame, save: bool = True, show: bool = Fals
     ticks = list(range(0, len(monthly), max(1, len(monthly) // 10)))
     ax.set_xticks(ticks)
     ax.set_xticklabels([str(monthly.index[i]) for i in ticks], rotation=45, fontsize=7)
-    ax.set_xlabel("Month"); ax.set_ylabel("Flare Count"); ax.set_title("Monthly Flare Count")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Flare Count")
+    ax.set_title("Monthly Flare Count")
 
     ax = axes[1, 1]
     if "has_hxr" in df.columns:
         vals = [int((~df["has_hxr"]).sum()), int(df["has_hxr"].sum())]
-        ax.pie(vals, labels=["SXR only", "SXR + HXR"], autopct="%1.1f%%",
-               colors=["skyblue", "salmon"])
+        ax.pie(
+            vals,
+            labels=["SXR only", "SXR + HXR"],
+            autopct="%1.1f%%",
+            colors=["skyblue", "salmon"],
+        )
         ax.set_title("HXR Confirmation")
     else:
         ax.text(0.5, 0.5, "No HXR data", transform=ax.transAxes, ha="center")
@@ -209,7 +302,9 @@ def plot_flare_statistics(df: pd.DataFrame, save: bool = True, show: bool = Fals
     plt.suptitle("Nowcast Catalogue Statistics", fontsize=14, fontweight="bold", y=1.02)
     plt.tight_layout()
     if save:
-        fig.savefig(PLOTS_STATISTICS / "flare_statistics.png", dpi=150, bbox_inches="tight")
+        fig.savefig(
+            PLOTS_STATISTICS / "flare_statistics.png", dpi=150, bbox_inches="tight"
+        )
     if show:
         plt.show()
     plt.close(fig)
@@ -217,6 +312,7 @@ def plot_flare_statistics(df: pd.DataFrame, save: bool = True, show: bool = Fals
 
 
 # ── Flare examples with light curves ────────────────────────────────────
+
 
 def plot_flare_examples(
     df: pd.DataFrame,
@@ -251,12 +347,18 @@ def plot_flare_examples(
         ax.plot(t_h, bg, "gray", lw=1, alpha=0.5, label="Background")
 
         for _, evt in df[df["date"] == ds].iterrows():
-            ax.axvspan(evt["start_time"] / 3600, evt["end_time"] / 3600,
-                        alpha=0.3, color="red")
+            ax.axvspan(
+                evt["start_time"] / 3600, evt["end_time"] / 3600, alpha=0.3, color="red"
+            )
             ax.axvline(evt["peak_time"] / 3600, color="red", lw=1, ls="--")
-            ax.annotate(f'{evt["goes_class"]}\n{evt["peak_flux"]:.0f}',
-                        xy=(evt["peak_time"] / 3600, evt["peak_flux"]),
-                        fontsize=7, color="red", ha="center", va="bottom")
+            ax.annotate(
+                f"{evt['goes_class']}\n{evt['peak_flux']:.0f}",
+                xy=(evt["peak_time"] / 3600, evt["peak_flux"]),
+                fontsize=7,
+                color="red",
+                ha="center",
+                va="bottom",
+            )
 
         n_flares = len(df[df["date"] == ds])
         ax.set_ylabel("Counts/s")
@@ -275,6 +377,7 @@ def plot_flare_examples(
 
 
 # ── Feature importance ──────────────────────────────────────────────────
+
 
 def plot_feature_importance(
     X: np.ndarray,
@@ -318,7 +421,9 @@ def plot_feature_importance(
     plt.suptitle("Feature Importance Analysis", fontsize=14, fontweight="bold")
     plt.tight_layout()
     if save:
-        fig.savefig(PLOTS_STATISTICS / "feature_importance.png", dpi=150, bbox_inches="tight")
+        fig.savefig(
+            PLOTS_STATISTICS / "feature_importance.png", dpi=150, bbox_inches="tight"
+        )
     if show:
         plt.show()
     plt.close(fig)
@@ -326,6 +431,7 @@ def plot_feature_importance(
 
 
 # ── Feature distributions ───────────────────────────────────────────────
+
 
 def plot_feature_distributions(
     X: np.ndarray,
@@ -351,15 +457,33 @@ def plot_feature_distributions(
             continue
         p99, p01 = np.percentile(v, [1, 99])
         mask = (feat >= p01) & (feat <= p99) & np.isfinite(feat)
-        ax.hist(feat[mask & (y == 0)], bins=50, alpha=0.5, color="blue", label="No flare", density=True)
-        ax.hist(feat[mask & (y == 1)], bins=50, alpha=0.5, color="red", label="Flare", density=True)
+        ax.hist(
+            feat[mask & (y == 0)],
+            bins=50,
+            alpha=0.5,
+            color="blue",
+            label="No flare",
+            density=True,
+        )
+        ax.hist(
+            feat[mask & (y == 1)],
+            bins=50,
+            alpha=0.5,
+            color="red",
+            label="Flare",
+            density=True,
+        )
         ax.set_title(f"{feature_names[idx]}\nMI={mi[idx]:.3f}", fontsize=9)
         ax.legend(fontsize=7)
 
-    plt.suptitle("Feature Distributions: Flare vs No-Flare", fontsize=13, fontweight="bold")
+    plt.suptitle(
+        "Feature Distributions: Flare vs No-Flare", fontsize=13, fontweight="bold"
+    )
     plt.tight_layout()
     if save:
-        fig.savefig(PLOTS_STATISTICS / "feature_distributions.png", dpi=150, bbox_inches="tight")
+        fig.savefig(
+            PLOTS_STATISTICS / "feature_distributions.png", dpi=150, bbox_inches="tight"
+        )
     if show:
         plt.show()
     plt.close(fig)
@@ -367,6 +491,7 @@ def plot_feature_distributions(
 
 
 # ── Model evaluation ────────────────────────────────────────────────────
+
 
 def plot_model_evaluation(
     results: dict[str, dict],
@@ -381,17 +506,23 @@ def plot_model_evaluation(
     ax = axes[0]
     for name, r in results.items():
         fpr, tpr, _ = roc_curve(r["y_test"], r["y_pred_prob"])
-        ax.plot(fpr, tpr, lw=2, label=f'{name} (AUC={r["auc_roc"]:.3f})')
+        ax.plot(fpr, tpr, lw=2, label=f"{name} (AUC={r['auc_roc']:.3f})")
     ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
-    ax.set_xlabel("FPR"); ax.set_ylabel("TPR"); ax.set_title("ROC Curves")
-    ax.legend(); ax.grid(True, alpha=0.3)
+    ax.set_xlabel("FPR")
+    ax.set_ylabel("TPR")
+    ax.set_title("ROC Curves")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
 
     ax = axes[1]
     for name, r in results.items():
         prec, rec, _ = precision_recall_curve(r["y_test"], r["y_pred_prob"])
-        ax.plot(rec, prec, lw=2, label=f'{name} (AP={r["auc_pr"]:.3f})')
-    ax.set_xlabel("Recall"); ax.set_ylabel("Precision"); ax.set_title("PR Curves")
-    ax.legend(); ax.grid(True, alpha=0.3)
+        ax.plot(rec, prec, lw=2, label=f"{name} (AP={r['auc_pr']:.3f})")
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("PR Curves")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
 
     ax = axes[2]
     names = list(results.keys())
@@ -401,14 +532,19 @@ def plot_model_evaluation(
     for i, name in enumerate(names):
         vals = [results[name].get(m, 0) for m in metrics]
         ax.bar(x + i * w, vals, w, label=name, alpha=0.7)
-    ax.set_xticks(x + w); ax.set_xticklabels(["Precision", "Recall", "F1"])
-    ax.set_ylim(0, 1); ax.set_title("Model Comparison")
-    ax.legend(); ax.grid(True, alpha=0.3, axis="y")
+    ax.set_xticks(x + w)
+    ax.set_xticklabels(["Precision", "Recall", "F1"])
+    ax.set_ylim(0, 1)
+    ax.set_title("Model Comparison")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
 
     plt.suptitle("Forecasting Model Evaluation", fontsize=14, fontweight="bold")
     plt.tight_layout()
     if save:
-        fig.savefig(PLOTS_FORECAST / "model_evaluation.png", dpi=150, bbox_inches="tight")
+        fig.savefig(
+            PLOTS_FORECAST / "model_evaluation.png", dpi=150, bbox_inches="tight"
+        )
     if show:
         plt.show()
     plt.close(fig)
