@@ -17,13 +17,23 @@ _SXR_FEATURES = [
     "sxr_range", "sxr_rise_rate", "sxr_skew", "sxr_spec_entropy", "sxr_std",
 ]
 _HXR_FEATURES = [
+    # CZT1 bands (20-160 keV)
     "hxr_b0_max", "hxr_b0_mean", "hxr_b0_std",
     "hxr_b1_max", "hxr_b1_mean", "hxr_b1_std",
     "hxr_b2_max", "hxr_b2_mean", "hxr_b2_std",
     "hxr_b3_max", "hxr_b3_mean", "hxr_b3_std",
     "hxr_b4_max", "hxr_b4_mean", "hxr_b4_std",
+    # CdTe1 bands (1.8-90 keV)
+    "hxr_b5_max", "hxr_b5_mean", "hxr_b5_std",
+    "hxr_b6_max", "hxr_b6_mean", "hxr_b6_std",
+    "hxr_b7_max", "hxr_b7_mean", "hxr_b7_std",
+    "hxr_b8_max", "hxr_b8_mean", "hxr_b8_std",
+    "hxr_b9_max", "hxr_b9_mean", "hxr_b9_std",
+    # Derived
     "hxr_hardness_ratio", "hxr_total_mean",
     "soft_hard_ratio",
+    # CdTe-specific
+    "cdte_thermal_ratio", "cdte_boundary_ratio",
 ]
 _META_FEATURES = ["window_len"]
 
@@ -106,6 +116,25 @@ def extract_features_window(
             ml = min(len(valid), len(hxr_sum))
             ratio = np.where(hxr_sum[:ml] > 0, valid[:ml] / (hxr_sum[:ml] + 1e-6), 0.0)
             f["soft_hard_ratio"] = float(np.mean(ratio))
+
+        # CdTe-specific features (bands 5-9 in combined array)
+        if nbands >= 10:
+            # Thermal ratio: CdTe low (5-20 keV) / CZT full (18-160 keV)
+            thermal_lo = hxr[:, 5]  # CdTe 5-20 keV
+            czt_full = hxr[:, 4]    # CZT 18-160 keV
+            tr = np.where(np.isfinite(thermal_lo) & np.isfinite(czt_full),
+                         thermal_lo / np.maximum(czt_full, 1e-6), 0.0)
+            f["cdte_thermal_ratio"] = float(np.nanmean(tr))
+
+            # Boundary ratio: CdTe 20-30 keV / CdTe 5-20 keV
+            bd_lo = hxr[:, 5]  # CdTe 5-20 keV
+            bd_hi = hxr[:, 6]  # CdTe 20-30 keV
+            br = np.where(np.isfinite(bd_lo) & np.isfinite(bd_hi),
+                         bd_hi / np.maximum(bd_lo, 1e-6), 0.0)
+            f["cdte_boundary_ratio"] = float(np.nanmean(br))
+        else:
+            f["cdte_thermal_ratio"] = 0.0
+            f["cdte_boundary_ratio"] = 0.0
 
     f["window_len"] = float(len(valid))
     return f

@@ -97,7 +97,7 @@ The combined SoLEXS + HEL1OS coverage spans **1.8–160 keV**:
 
 ## 4. Feature Engineering Results
 
-**42 canonical features** extracted per analysis window:
+**59 canonical features** extracted per analysis window (CZT + CdTe combined):
 
 | Feature Category | Count | Description |
 |-----------------|-------|-------------|
@@ -105,32 +105,36 @@ The combined SoLEXS + HEL1OS coverage spans **1.8–160 keV**:
 | SXR spectral | 2 | spectral entropy, peak frequency |
 | SXR autocorrelation | 4 | ACF at lags 5s, 10s, 30s, 60s |
 | SXR percentiles | 4 | P5, P25, P75, P95 |
-| HXR band-level | 15 | mean, std, max for 5 energy bands |
+| CZT HXR band-level | 15 | mean, std, max for 5 energy bands (20-160 keV) |
+| CdTe HXR band-level | 15 | mean, std, max for 5 energy bands (1.8-90 keV) |
 | HXR derived | 3 | hardness ratio, total mean, soft-hard ratio |
+| CdTe-specific | 2 | thermal ratio (CdTe/CZT), boundary ratio (20-30/5-20 keV) |
 | Meta | 1 | window length |
 
 **Key inferences:**
 - The **spectral entropy** feature captures the complexity of the X-ray spectrum — higher entropy during quiet times, lower during flares (dominated by a single thermal component)
 - **Hardness ratio** (HXR high-energy / low-energy) is a direct proxy for non-thermal electron acceleration
 - **Autocorrelation** at 60s lag captures the quasi-periodic pulsations observed in many flares
+- **CdTe thermal ratio** (5-20 keV / 18-160 keV) tracks the thermal/non-thermal boundary — rises during flare onset
+- **CdTe boundary ratio** (20-30 / 5-20 keV) captures spectral hardening before impulsive phase
 
 ---
 
 ## 5. Model Performance
 
-Three gradient-boosted tree models trained on the 42-feature matrix (199,824 samples, 9.70% positive rate):
+Three gradient-boosted tree models trained on the 59-feature matrix (199,824 samples, 9.7% positive rate):
 
-| Model | AUC-ROC | AUC-PR | F1 | Precision | Recall |
-|-------|---------|--------|----|-----------|--------|
-| **LightGBM** | 0.634 | 0.156 | 0.158 | 0.223 | 0.122 |
-| **XGBoost** | 0.632 | 0.157 | 0.143 | 0.248 | 0.100 |
-| **CatBoost** | **0.664** | 0.150 | **0.203** | 0.156 | **0.289** |
+| Model | TSS | HSS | AUC-ROC | AUC-PR | F1 | Precision | Recall | TP | FP | FN | TN |
+|-------|-----|-----|---------|--------|----|-----------|--------|----|----|----|----|
+| **CatBoost** | **0.149** | 0.113 | **0.659** | 0.150 | **0.199** | 0.159 | **0.267** | 617 | 3276 | 1692 | 24389 |
+| **LightGBM** | 0.111 | **0.126** | 0.644 | 0.156 | 0.183 | **0.214** | 0.161 | 371 | 1365 | 1938 | 26300 |
+| **XGBoost** | 0.093 | 0.115 | 0.632 | 0.157 | 0.165 | 0.224 | 0.131 | 303 | 1053 | 2006 | 26612 |
 
 **Key observations:**
-- **CatBoost** achieves the highest AUC-ROC (0.664) and best recall (0.289) — it catches the most flares
-- **XGBoost** has the highest precision (0.248) — when it predicts a flare, it's most often correct
-- **LightGBM** provides a balanced middle ground
-- All models perform above random (AUC-ROC > 0.5), confirming that X-ray spectral features contain predictive signal
+- **CatBoost** achieves the highest TSS (0.149) and recall (26.7%) — it catches the most flares but has more false positives
+- **LightGBM** has the best precision (21.4%) and balanced skill (HSS=0.126) — fewer false alarms
+- **XGBoost** is most conservative — highest precision (22.4%) but lowest recall (13.1%)
+- All models perform above random (TSS > 0), confirming X-ray spectral features contain predictive signal
 
 ### Why Performance is Moderate
 
@@ -138,6 +142,7 @@ Three gradient-boosted tree models trained on the 42-feature matrix (199,824 sam
 2. **Short prediction horizon:** 30-minute look-ahead window captures many ambiguous boundary cases
 3. **Missing HXR data:** ~76% of each day has no HEL1OS data (orbital gaps), reducing feature quality for those windows
 4. **No spectral fitting:** Features use raw band statistics rather than physical parameters (temperature T, emission measure EM)
+5. **CdTe adds coverage but not resolution:** CdTe 1.8-90 keV bridges thermal/non-thermal gap, but without spectral fitting we're still using broadband statistics
 
 ### Expected Performance Benchmarks (from literature)
 
@@ -193,8 +198,8 @@ The entire month of June 2024 (30 days) is missing from SoLEXS data. This is the
 
 ## 8. Next Steps
 
-1. ~~Complete feature extraction~~ ✅ Done — 199,824 samples × 42 features extracted
-2. ~~Train and evaluate forecasting models~~ ✅ Done — LightGBM, XGBoost, CatBoost trained
+1. ~~Complete feature extraction~~ ✅ Done — 199,824 samples × 59 features (CZT + CdTe)
+2. ~~Train and evaluate forecasting models~~ ✅ Done — TSS up to 0.149 (CatBoost)
 3. **Implement spectral-temporal transformer** (N3) — core novel contribution
 4. **Add Neupert physics-informed loss** (N2) as regularization
 5. **Compute transfer entropy** between HEL1OS and SoLEXS channels (N4)

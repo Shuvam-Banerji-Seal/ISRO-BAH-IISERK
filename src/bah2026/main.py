@@ -104,12 +104,33 @@ def _process_day_features(args: tuple[date, list[float]]) -> tuple[np.ndarray, n
 
     hxr_aligned = None
     try:
-        hxr = load_hel1os_lc(d, detector="czt", num=1)
-        if hxr["ctr"].size > 0:
+        czt = load_hel1os_lc(d, detector="czt", num=1)
+        if czt["ctr"].size > 0:
             hxr_aligned = align_hel1os_to_solexs(
-                hxr["mjd"], hxr["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"])
+                czt["mjd"], czt["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"])
     except Exception:
         pass
+
+    # Also load CdTe1 (1.8-90 keV) — bridges thermal/non-thermal gap
+    cdte_aligned = None
+    try:
+        cdte = load_hel1os_lc(d, detector="cdte", num=1)
+        if cdte["ctr"].size > 0:
+            cdte_aligned = align_hel1os_to_solexs(
+                cdte["mjd"], cdte["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"])
+    except Exception:
+        pass
+
+    # Combine CZT (5 bands) + CdTe (5 bands) = 10 HXR channels
+    if hxr_aligned is not None and cdte_aligned is not None:
+        min_len = min(len(hxr_aligned), len(cdte_aligned))
+        combined_hxr = np.hstack([hxr_aligned[:min_len], cdte_aligned[:min_len]])
+    elif hxr_aligned is not None:
+        combined_hxr = hxr_aligned
+    elif cdte_aligned is not None:
+        combined_hxr = cdte_aligned
+    else:
+        combined_hxr = None
 
     lookback, step = FEATURE_LOOKBACK_SEC, FEATURE_STEP_SEC
     canonical = get_canonical_feature_names()
@@ -119,9 +140,9 @@ def _process_day_features(args: tuple[date, list[float]]) -> tuple[np.ndarray, n
     for i in range(lookback, len(counts), step):
         sxr_win = counts[i - lookback:i]
         hxr_win = None
-        if hxr_aligned is not None:
-            h_len = len(hxr_aligned)
-            hxr_win = hxr_aligned[max(0, i - lookback):min(h_len, i)]
+        if combined_hxr is not None:
+            h_len = len(combined_hxr)
+            hxr_win = combined_hxr[max(0, i - lookback):min(h_len, i)]
 
         feat = extract_features_window(sxr_win, hxr_win, window=lookback)
         if feat is None:
@@ -264,7 +285,8 @@ def cmd_forecast(
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import (
         roc_auc_score, average_precision_score, f1_score,
-        precision_score, recall_score,
+        precision_score, recall_score, confusion_matrix,
+        balanced_accuracy_score, matthews_corrcoef, cohen_kappa_score,
     )
     from bah2026.models import (
         FlareForecasterLightGBM, FlareForecasterXGBoost, FlareForecasterCatBoost,
@@ -310,17 +332,31 @@ def cmd_forecast(
         prob = model.predict_proba(Xte_s)
         pred = (prob > 0.5).astype(int)
 
+        tn, fp, fn, tp = confusion_matrix(yte, pred).ravel()
+        tpr = tp / max(tp + fn, 1)  # recall
+        fpr = fp / max(fp + tn, 1)
+        tss = tpr - fpr
+        hss_num = 2 * (tp * tn - fp * fn)
+        hss_den = (tp + fn) * (fn + tn) + (tp + fp) * (fp + tn)
+        hss = hss_num / max(hss_den, 1)
+
         results[name] = {
             "auc_roc": float(roc_auc_score(yte, prob)) if yte.sum() > 0 else 0.0,
             "auc_pr": float(average_precision_score(yte, prob)) if yte.sum() > 0 else 0.0,
+            "tss": float(tss),
+            "hss": float(hss),
             "f1": float(f1_score(yte, pred, zero_division=0)),
             "precision": float(precision_score(yte, pred, zero_division=0)),
             "recall": float(recall_score(yte, pred, zero_division=0)),
+            "balanced_accuracy": float(balanced_accuracy_score(yte, pred)),
+            "mcc": float(matthews_corrcoef(yte, pred)),
+            "kappa": float(cohen_kappa_score(yte, pred)),
+            "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn),
             "y_pred_prob": prob,
             "y_test": yte,
         }
         r = results[name]
-        print(f"  {name}: AUC-ROC={r['auc_roc']:.3f}  AUC-PR={r['auc_pr']:.3f}  "
+        print(f"  {name}: TSS={tss:.3f}  HSS={hss:.3f}  AUC-ROC={r['auc_roc']:.3f}  "
               f"F1={r['f1']:.3f}  P={r['precision']:.3f}  R={r['recall']:.3f}")
 
     serializable = {
