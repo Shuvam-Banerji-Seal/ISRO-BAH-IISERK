@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 EXTERNAL_DIR = Path(__file__).resolve().parents[3] / "data" / "external" / "goes"
+CATALOGS_DIR = Path(__file__).resolve().parents[3] / "output" / "catalogs"
 
 # GOES classification thresholds (W/m², peak 0.1-0.8 nm flux)
 GOES_THRESHOLDS = {
@@ -61,33 +62,59 @@ def parse_goes_class(class_str: str) -> float:
 
 
 def load_swpc_flares() -> pd.DataFrame:
-    """Load SWPC GOES flare events from cached files.
+    """Load SWPC/GOES flare events from cached files.
+
+    Sources (tried in order):
+      1. GOES XRSF-derived catalog from build_goes_catalog.py (most reliable)
+      2. HEK SWPC CSV
+      3. SWPC JSON endpoints
 
     Returns
     -------
     df : pd.DataFrame
         Columns: date, begin_time, peak_time, end_time, goes_class,
-                 begin_flux, peak_flux, active_region
+                 peak_flux, duration_sec
     """
     all_events = []
 
-    # Try HEK SWPC CSV first (most comprehensive)
+    # Try GOES XRSF-derived catalog first (most complete and reliable)
+    goes_catalog = CATALOGS_DIR / "goes_flare_catalog.csv"
+    if goes_catalog.exists():
+        try:
+            df = pd.read_csv(goes_catalog)
+            required = {"date", "peak_time", "goes_class", "peak_flux"}
+            if required.issubset(set(df.columns)):
+                df["begin_time"] = pd.to_datetime(df["start_time"], unit="s", utc=True)
+                df["peak_time"] = pd.to_datetime(df["peak_time"], unit="s", utc=True)
+                df["end_time"] = pd.to_datetime(df["end_time"], unit="s", utc=True)
+                print(f"Loaded {len(df)} events from GOES XRSF catalog")
+                return df
+        except Exception as e:
+            print(f"GOES catalog load failed: {e}")
+
+    # Try HEK SWPC CSV
     hek_file = EXTERNAL_DIR / "hek_swpc_flares.csv"
     if hek_file.exists():
         try:
             df = pd.read_csv(hek_file)
             # Map HEK columns to standard format
-            required = {"event_starttime", "event_peaktime", "event_endtime",
-                        "fl_goescls"}
+            required = {
+                "event_starttime",
+                "event_peaktime",
+                "event_endtime",
+                "fl_goescls",
+            }
             if required.issubset(set(df.columns)):
-                events = pd.DataFrame({
-                    "date": df["event_starttime"].str[:10],
-                    "begin_time": pd.to_datetime(df["event_starttime"]),
-                    "peak_time": pd.to_datetime(df["event_peaktime"]),
-                    "end_time": pd.to_datetime(df["event_endtime"]),
-                    "goes_class": df["fl_goescls"],
-                    "active_region": df.get("ar_noaa", np.nan),
-                })
+                events = pd.DataFrame(
+                    {
+                        "date": df["event_starttime"].str[:10],
+                        "begin_time": pd.to_datetime(df["event_starttime"]),
+                        "peak_time": pd.to_datetime(df["event_peaktime"]),
+                        "end_time": pd.to_datetime(df["event_endtime"]),
+                        "goes_class": df["fl_goescls"],
+                        "active_region": df.get("ar_noaa", np.nan),
+                    }
+                )
                 events["peak_flux"] = events["goes_class"].apply(parse_goes_class)
                 all_events.append(events)
                 print(f"Loaded {len(events)} flares from HEK SWPC")
@@ -98,19 +125,26 @@ def load_swpc_flares() -> pd.DataFrame:
     for json_file in EXTERNAL_DIR.glob("*.json"):
         try:
             import json
+
             data = json.loads(json_file.read_text())
             if isinstance(data, list) and len(data) > 0 and "begin" in data[0]:
                 rows = []
                 for evt in data:
-                    rows.append({
-                        "date": evt.get("begin", "")[:10],
-                        "begin_time": pd.to_datetime(evt["begin"]),
-                        "peak_time": pd.to_datetime(evt["peak"]) if "peak" in evt else None,
-                        "end_time": pd.to_datetime(evt["end"]) if "end" in evt else None,
-                        "goes_class": f"{evt.get('class_type', '')}{evt.get('class_value', 0)}",
-                        "peak_flux": float(evt.get("peak", 0)) * 1e-4,
-                        "active_region": evt.get("active_region_num", np.nan),
-                    })
+                    rows.append(
+                        {
+                            "date": evt.get("begin", "")[:10],
+                            "begin_time": pd.to_datetime(evt["begin"]),
+                            "peak_time": pd.to_datetime(evt["peak"])
+                            if "peak" in evt
+                            else None,
+                            "end_time": pd.to_datetime(evt["end"])
+                            if "end" in evt
+                            else None,
+                            "goes_class": f"{evt.get('class_type', '')}{evt.get('class_value', 0)}",
+                            "peak_flux": float(evt.get("peak", 0)) * 1e-4,
+                            "active_region": evt.get("active_region_num", np.nan),
+                        }
+                    )
                 df_ev = pd.DataFrame(rows)
                 all_events.append(df_ev)
                 print(f"Loaded {len(df_ev)} events from {json_file.name}")
@@ -118,12 +152,21 @@ def load_swpc_flares() -> pd.DataFrame:
             pass
 
     if not all_events:
-        print("WARNING: No SWPC flare data available. "
-              "Run data acquisition or place GOES catalog in data/external/goes/")
-        return pd.DataFrame(columns=[
-            "date", "begin_time", "peak_time", "end_time",
-            "goes_class", "peak_flux", "active_region",
-        ])
+        print(
+            "WARNING: No SWPC flare data available. "
+            "Run data acquisition or place GOES catalog in data/external/goes/"
+        )
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "begin_time",
+                "peak_time",
+                "end_time",
+                "goes_class",
+                "peak_flux",
+                "active_region",
+            ]
+        )
 
     # Combine and deduplicate
     combined = pd.concat(all_events, ignore_index=True)
@@ -171,8 +214,14 @@ def validate_nowcasting(
     dict with keys: tp, fp, fn, precision, recall, f1, null_distances, ...
     """
     if detected_events.empty or truth_events.empty:
-        return {"tp": 0, "fp": len(detected_events), "fn": len(truth_events),
-                "precision": 0.0, "recall": 0.0, "f1": 0.0}
+        return {
+            "tp": 0,
+            "fp": len(detected_events),
+            "fn": len(truth_events),
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+        }
 
     tp, fp, fn = 0, 0, 0
     matched_truth = set()
@@ -183,7 +232,11 @@ def validate_nowcasting(
         for idx, tr in truth_events.iterrows():
             if idx in matched_truth:
                 continue
-            tr_t = tr["peak_time"].timestamp() if hasattr(tr["peak_time"], "timestamp") else float(tr["peak_time"])
+            tr_t = (
+                tr["peak_time"].timestamp()
+                if hasattr(tr["peak_time"], "timestamp")
+                else float(tr["peak_time"])
+            )
             if abs(det_t - tr_t) <= tolerance_sec:
                 tp += 1
                 matched_truth.add(idx)
@@ -198,7 +251,9 @@ def validate_nowcasting(
     f1 = 2 * precision * recall / max(precision + recall, 1e-10)
 
     return {
-        "tp": tp, "fp": fp, "fn": fn,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
         "precision": precision,
         "recall": recall,
         "f1": f1,

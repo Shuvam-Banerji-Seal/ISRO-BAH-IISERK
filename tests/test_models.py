@@ -16,10 +16,10 @@ from bah2026.config import (
     NOWCAST_BACKGROUND_WINDOW_SEC,
 )
 
-# Calibration: solexs_counts_to_irradiance_simple(counts) = counts * 5.0e-9 W/m²
+# Calibration: solexs_counts_to_irradiance_simple(counts) = counts * 2.5e-8 W/m²
 # GOES thresholds: X >= 1e-4, M >= 1e-5, C >= 1e-6, B >= 1e-7
-# So: X at 20000 cts, M at 2000 cts, C at 200 cts, B at 20 cts
-_CAL = 5.0e-9  # FLUX_PER_COUNT in calibration.py
+# So: X at 4000 cts, M at 400 cts, C at 40 cts, B at 4 cts
+_CAL = 2.5e-8  # FLUX_PER_COUNT in calibration.py (GOES-validated)
 
 
 # ── Nowcasting tests ────────────────────────────────────────────────────
@@ -94,12 +94,13 @@ def test_detect_flares_bayesian_blocks_no_event():
 
 
 def test_classify_flare_goes():
-    # Calibrated: 20000 cts → X, 2000 → M, 200 → C, 20 → B, <20 → A
-    assert classify_flare_goes(20000.0) == "X"
-    assert classify_flare_goes(2000.0) == "M"
-    assert classify_flare_goes(200.0) == "C"
-    assert classify_flare_goes(20.0) == "B"
-    assert classify_flare_goes(5.0) == "A"
+    # Calibrated (2.5e-8): ~4000 cts → X, ~400 → M, ~40 → C, ~4 → B
+    # Add small margins to avoid float-boundary issues (4000*2.5e-8 ≈ 9.999...e-5)
+    assert classify_flare_goes(4100.0) == "X"
+    assert classify_flare_goes(410.0) == "M"
+    assert classify_flare_goes(41.0) == "C"
+    assert classify_flare_goes(5.0) == "B"
+    assert classify_flare_goes(1.0) == "A"
 
 
 def test_classify_flare_goes_boundary():
