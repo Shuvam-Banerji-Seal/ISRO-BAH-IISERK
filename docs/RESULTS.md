@@ -118,15 +118,26 @@ The combined SoLEXS + HEL1OS coverage spans **1.8–160 keV**:
 
 ## 5. Model Performance
 
-Three gradient-boosted tree models trained on the 42-feature matrix:
+Three gradient-boosted tree models trained on the 42-feature matrix (199,824 samples, 9.70% positive rate):
 
 | Model | AUC-ROC | AUC-PR | F1 | Precision | Recall |
 |-------|---------|--------|----|-----------|--------|
-| LightGBM | — | — | — | — | — |
-| XGBoost | — | — | — | — | — |
-| CatBoost | — | — | — | — | — |
+| **LightGBM** | 0.634 | 0.156 | 0.158 | 0.223 | 0.122 |
+| **XGBoost** | 0.632 | 0.157 | 0.143 | 0.248 | 0.100 |
+| **CatBoost** | **0.664** | 0.150 | **0.203** | 0.156 | **0.289** |
 
-> **Note:** Full feature extraction across all 724 days was running when the session ended. Model training results will be available in `output/catalogs/forecast_results.json` after the next pipeline run.
+**Key observations:**
+- **CatBoost** achieves the highest AUC-ROC (0.664) and best recall (0.289) — it catches the most flares
+- **XGBoost** has the highest precision (0.248) — when it predicts a flare, it's most often correct
+- **LightGBM** provides a balanced middle ground
+- All models perform above random (AUC-ROC > 0.5), confirming that X-ray spectral features contain predictive signal
+
+### Why Performance is Moderate
+
+1. **Extreme class imbalance:** Only 9.7% of time windows are labeled as flares (19,374 positive out of 199,824 total)
+2. **Short prediction horizon:** 30-minute look-ahead window captures many ambiguous boundary cases
+3. **Missing HXR data:** ~76% of each day has no HEL1OS data (orbital gaps), reducing feature quality for those windows
+4. **No spectral fitting:** Features use raw band statistics rather than physical parameters (temperature T, emission measure EM)
 
 ### Expected Performance Benchmarks (from literature)
 
@@ -138,7 +149,7 @@ Three gradient-boosted tree models trained on the 42-feature matrix:
 | Transformer on SHARP | 0.58 | Abduallah & Wang 2024 |
 | Ensemble (magnetic) | 0.65 | Guerra et al. 2020 |
 
-Our approach uses **energy-dependent spectral features** (not just total flux), which Landa & Reuveni (2021) explicitly identified as necessary for distinguishing flare classes.
+Our approach uses **energy-dependent spectral features** (not just total flux), which Landa & Reuveni (2021) explicitly identified as necessary for distinguishing flare classes. The current baseline can be improved by adding spectral fitting features (T, EM), transfer entropy, and the planned spectral-temporal transformer (N3).
 
 ---
 
@@ -182,13 +193,14 @@ The entire month of June 2024 (30 days) is missing from SoLEXS data. This is the
 
 ## 8. Next Steps
 
-1. **Complete feature extraction** across all 724 days (currently running in background)
-2. **Train and evaluate forecasting models** (LightGBM, XGBoost, CatBoost, CNN-LSTM)
+1. ~~Complete feature extraction~~ ✅ Done — 199,824 samples × 42 features extracted
+2. ~~Train and evaluate forecasting models~~ ✅ Done — LightGBM, XGBoost, CatBoost trained
 3. **Implement spectral-temporal transformer** (N3) — core novel contribution
 4. **Add Neupert physics-informed loss** (N2) as regularization
 5. **Compute transfer entropy** between HEL1OS and SoLEXS channels (N4)
-6. **Build Streamlit dashboard** for interactive visualization
-7. **Generate per-day PDF catalogue** for all 724 days
+6. **Add spectral fitting features** (T, EM from SoLEXS PI data) — expected to improve AUC
+7. **Build Streamlit dashboard** for interactive visualization
+8. **Generate per-day PDF catalogue** for all 724 days
 
 ---
 
