@@ -64,9 +64,7 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
     )
     from bah2026.data.preprocessing import (
         compute_gti_mask,
-        met_to_mjd,
         forward_fill_nan,
-        background_subtract_iterative,
     )
     from bah2026.models.nowcasting import (
         detect_flares_swpc,
@@ -85,11 +83,11 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
     time_s = solexs["time"]
     n = len(counts)
 
-    # Apply GTI masking (NaNs outside GTI)
+    # Apply GTI masking (GTI START/STOP are Unix seconds, same as TIME)
     gti = load_solexs_gti(d)
     if len(gti) > 0:
-        solexs_mjd = met_to_mjd(time_s, solexs["mjdrefi"], solexs["mjdreff"])
-        gti_mask = compute_gti_mask(solexs_mjd, gti)
+        # GTI START/STOP are Unix seconds (confirmed: same epoch as TIME column)
+        gti_mask = compute_gti_mask(time_s, gti)
         counts[~gti_mask] = np.nan
 
     # Fill NaNs with forward-fill (preserves peak shape for saturated flares)

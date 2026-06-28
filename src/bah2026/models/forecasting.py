@@ -94,7 +94,6 @@ class FlareForecasterXGBoost:
             eval_metric="auc",
             verbosity=0,
             random_state=_RANDOM_STATE,
-            early_stopping_rounds=None,  # Set via fit() eval_set
         )
 
     def fit(self, X_train, y_train, X_val=None, y_val=None):
@@ -104,7 +103,6 @@ class FlareForecasterXGBoost:
                 y_train,
                 eval_set=[(X_val, y_val)],
                 verbose=False,
-                early_stopping_rounds=50,
             )
         else:
             self.model.fit(X_train, y_train, verbose=False)
