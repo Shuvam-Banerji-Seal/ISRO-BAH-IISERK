@@ -17,6 +17,7 @@ from bah2026.data.preprocessing import (
     met_to_mjd,
     align_hel1os_to_solexs,
     background_subtract_iterative,
+    forward_fill_nan,
 )
 from bah2026.data.hdf5_builder import build_hdf5
 from bah2026.data.calibration import (

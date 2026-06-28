@@ -65,6 +65,7 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
     from bah2026.data.preprocessing import (
         compute_gti_mask,
         met_to_mjd,
+        forward_fill_nan,
         background_subtract_iterative,
     )
     from bah2026.models.nowcasting import (
@@ -91,8 +92,8 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
         gti_mask = compute_gti_mask(solexs_mjd, gti)
         counts[~gti_mask] = np.nan
 
-    # Fill NaNs with median for detection
-    counts_filled = np.where(np.isfinite(counts), counts, np.nanmedian(counts))
+    # Fill NaNs with forward-fill (preserves peak shape for saturated flares)
+    counts_filled = forward_fill_nan(counts)
 
     # Convert to GOES-equivalent calibrated flux
     # Use the simple calibration (full response takes PI spectra which is heavy)

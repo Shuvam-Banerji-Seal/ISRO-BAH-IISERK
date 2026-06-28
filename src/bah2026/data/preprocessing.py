@@ -102,6 +102,48 @@ def background_subtract_iterative(
     return bg, valid - bg
 
 
+def forward_fill_nan(data: np.ndarray, fill_value: float | None = None) -> np.ndarray:
+    """Forward-fill NaN values with the last valid value.
+
+    For flares that saturate the detector (causing NaN after the peak),
+    forward-fill preserves the peak shape much better than median-fill.
+
+    Parameters
+    ----------
+    data : ndarray
+        Input array with possible NaN values.
+    fill_value : float, optional
+        Default value if data starts with NaN. Default: median of valid.
+
+    Returns
+    -------
+    filled : ndarray
+        Array with NaN values forward-filled.
+    """
+    result = data.copy()
+    mask = np.isfinite(result)
+    if not np.any(mask):
+        result[:] = fill_value or 0.0
+        return result
+
+    first_valid = np.where(mask)[0][0]
+    if fill_value is None:
+        fill_value = float(np.nanmedian(result))
+
+    # Fill leading NaN
+    result[:first_valid] = fill_value
+
+    # Forward-fill remaining NaN
+    last_valid = result[first_valid]
+    for i in range(first_valid + 1, len(result)):
+        if not np.isfinite(result[i]):
+            result[i] = last_valid
+        else:
+            last_valid = result[i]
+
+    return result
+
+
 def interpolate_to_common_grid(
     mjd_src: np.ndarray,
     values_src: np.ndarray,

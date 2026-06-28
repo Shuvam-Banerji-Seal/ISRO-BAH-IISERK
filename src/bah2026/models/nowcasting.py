@@ -210,7 +210,10 @@ def detect_flares_swpc(
         end_idx = max(end_idx, peak_idx)
 
         duration = end_idx - begin_idx + 1
-        if duration < min_duration_sec:
+        # Allow extremely impulsive high-class flares (single-bin spikes)
+        # If flux is above M-class, accept even very short events
+        high_class = peak_flux >= c_class_threshold * 10  # ≥M1.0
+        if duration < (10 if high_class else min_duration_sec):
             continue
 
         events.append(
