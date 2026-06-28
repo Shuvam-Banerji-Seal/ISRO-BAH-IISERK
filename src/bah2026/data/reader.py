@@ -224,3 +224,19 @@ def discover_hel1os_days() -> list[date]:
 def discover_combined_days() -> list[date]:
     """Return sorted list of dates with BOTH SoLEXS and HEL1OS data."""
     return sorted(set(discover_solexs_days()) & set(discover_hel1os_days()))
+
+
+# Known detector anomaly periods to exclude from training
+DETECTOR_ANOMALY_DAYS: set[date] = {
+    # 2026-02-01 to 2026-02-03: SoLEXS counts abnormally high (median 1063 vs 62)
+    # Combined with 48%+ NaN fraction and abnormal HEL1OS behavior
+    date(2026, 2, 1),
+    date(2026, 2, 2),
+    date(2026, 2, 3),
+    date(2026, 2, 4),
+}
+
+
+def is_anomaly_day(d: date) -> bool:
+    """Check if a date is a known detector anomaly period."""
+    return d in DETECTOR_ANOMALY_DAYS
