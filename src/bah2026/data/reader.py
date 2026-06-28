@@ -114,13 +114,22 @@ def load_hel1os_lc(d: date, detector: str = "czt", num: int = 1) -> dict:
 
         result["mjd"] = all_mjd
         result["isot"] = all_isot
-        # CdTe bands can have different row counts — truncate to min
+        # Align bands: truncate to min_rows (CZT bands are equal length;
+        # CdTe may differ by up to ~350 rows — truncate to shortest)
         if all_ctr:
             min_rows = min(len(a) for a in all_ctr)
-            all_ctr = [a[:min_rows] for a in all_ctr]
-            all_err = [a[:min_rows] for a in all_err]
-            result["mjd"] = all_mjd[:min_rows]
-            result["isot"] = all_isot[:min_rows]
+            band_lens = [len(a) for a in all_ctr]
+            if len(set(band_lens)) > 1:
+                # Variable-length bands: truncate all to shortest
+                all_ctr = [a[:min_rows] for a in all_ctr]
+                all_err = [e[:min_rows] for e in all_err]
+                result["mjd"] = all_mjd[:min_rows]
+                result["isot"] = all_isot[:min_rows]
+            else:
+                all_ctr = [a[:min_rows] for a in all_ctr]
+                all_err = [a[:min_rows] for a in all_err]
+                result["mjd"] = all_mjd[:min_rows]
+                result["isot"] = all_isot[:min_rows]
         result["ctr"] = np.column_stack(all_ctr) if all_ctr else np.empty((0, 0))
         result["stat_err"] = np.column_stack(all_err) if all_err else np.empty((0, 0))
 
