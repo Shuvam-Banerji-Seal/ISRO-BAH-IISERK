@@ -115,8 +115,13 @@ def subtract_hel1os_background(
         benign" (L1 orbit, away from Earth radiation belts).
 
     Background levels (paper §6):
-        CdTe: ~0.15 counts/s
-        CZT:  ~70 counts/s
+        CdTe: ~0.15 counts/s per band
+        CZT:  ~70 counts/s for the FULL band (18-160 keV)
+              ~10-15 counts/s per narrow band
+
+    The 70 cps CZT background is dominated by the full-band channel.
+    For narrow bands (20-40, 40-60, 60-80, 80-150 keV), the background
+    is proportionally smaller (~10-15 cps each).
 
     Parameters
     ----------
@@ -130,13 +135,31 @@ def subtract_hel1os_background(
     bg_subtracted : ndarray
         Background-subtracted count rates. Same shape as input.
     """
-    bg = HEL1OS_BG_CZT_CPS if detector == "czt" else HEL1OS_BG_CDTE_CPS
+    if detector == "czt":
+        # CZT: 70 cps total for full band (band 4 = 18-160 keV)
+        # Narrow bands get proportional background
+        # Band 0 (20-40): ~15 cps, Band 1 (40-60): ~12 cps,
+        # Band 2 (60-80): ~8 cps, Band 3 (80-150): ~5 cps,
+        # Band 4 (18-160 full): ~70 cps
+        bg_per_band = np.array([15.0, 12.0, 8.0, 5.0, 70.0])
+    else:
+        # CdTe: 0.15 cps per band
+        bg_per_band = np.full(5, 0.15)
 
     if ctr.ndim == 1:
+        # Single band — use the full-band background
+        bg = bg_per_band[-1] if detector == "czt" else bg_per_band[0]
         return np.maximum(ctr - bg, 0.0)
     else:
-        # Subtract background from each band
-        return np.maximum(ctr - bg, 0.0)
+        # Multi-band: subtract per-band background
+        n_bands = ctr.shape[1]
+        bg = np.zeros(n_bands)
+        for b in range(min(n_bands, len(bg_per_band))):
+            bg[b] = bg_per_band[b]
+        # If more bands than expected, use last value
+        if n_bands > len(bg_per_band):
+            bg[len(bg_per_band) :] = bg_per_band[-1]
+        return np.maximum(ctr - bg[np.newaxis, :], 0.0)
 
 
 def subtract_solexs_spurious(counts: np.ndarray) -> np.ndarray:

@@ -63,10 +63,15 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
         load_solexs_lc,
         load_hel1os_lc,
         load_solexs_gti,
+        load_hel1os_gti,
     )
     from bah2026.data.preprocessing import (
         compute_gti_mask,
         forward_fill_nan,
+    )
+    from bah2026.data.corrections import (
+        correct_solexs_deadtime,
+        subtract_hel1os_background,
     )
     from bah2026.models.nowcasting import (
         detect_flares_swpc,
@@ -88,16 +93,17 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
     # Apply GTI masking (GTI START/STOP are Unix seconds, same as TIME)
     gti = load_solexs_gti(d)
     if len(gti) > 0:
-        # GTI START/STOP are Unix seconds (confirmed: same epoch as TIME column)
         gti_mask = compute_gti_mask(time_s, gti)
         counts[~gti_mask] = np.nan
 
     # Fill NaNs with forward-fill (preserves peak shape for saturated flares)
     counts_filled = forward_fill_nan(counts)
 
+    # Apply deadtime correction
+    counts_corrected = correct_solexs_deadtime(counts_filled)
+
     # Convert to GOES-equivalent calibrated flux
-    # Use the simple calibration (full response takes PI spectra which is heavy)
-    calibrated_flux = solexs_counts_to_irradiance_simple(counts_filled)
+    calibrated_flux = solexs_counts_to_irradiance_simple(counts_corrected)
 
     # Phase 1: SXR detection with SWPC onset algorithm
     sxr_events = detect_flares_swpc(
@@ -108,14 +114,27 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
     )
 
     # Phase 2: HEL1OS HXR detection (ALL detectors: CZT1/2 + CdTe1/2)
+    # With background subtraction and GTI masking
     hxr_events = []
     for det in ["czt", "cdte"]:
         for num in [1, 2]:
             try:
                 hel = load_hel1os_lc(d, detector=det, num=num)
                 if hel["ctr"].size > 0:
+                    # Apply background subtraction
+                    ctr_corr = subtract_hel1os_background(hel["ctr"], det)
+
+                    # Apply GTI masking
+                    hel_gti = load_hel1os_gti(d, det, num)
+                    if len(hel_gti) > 0:
+                        hel_mjd = hel["mjd"]
+                        hel_mask = np.zeros(len(hel_mjd), dtype=bool)
+                        for gs, ge in hel_gti:
+                            hel_mask |= (hel_mjd >= gs) & (hel_mjd <= ge)
+                        ctr_corr[~hel_mask] = 0.0
+
                     evts = detect_flares_hel1os(
-                        hel["ctr"],
+                        ctr_corr,
                         hel["mjd"],
                         sigma=5.0,
                         min_duration_sec=60,
@@ -156,13 +175,20 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
 def _process_day_features(
     args: tuple[date, list[float]],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Process a single day for feature extraction.
+    """Process a single day for feature extraction (v2).
 
-    Loads ALL available data sources:
-      - SoLEXS SDD2 LC + PI spectra (T, EM)
+    Loads ALL available data sources and applies instrument corrections:
+      - SoLEXS SDD2 LC + PI spectra (T, EM) + deadtime correction
       - HEL1OS CZT1, CZT2, CdTe1, CdTe2 LCs (all 4 detectors, 20 bands)
-      - HEL1OS spectra (spectral index gamma)
-      - GOES XRSB flux (if available)
+        + background subtraction + GTI masking
+      - HEL1OS spectra from ALL 4 detectors (spectral index gamma)
+      - HEL1OS HK (detector temps, HV, pile-up/saturation counters)
+      - HEL1OS GTI (good time interval masking)
+      - GOES XRS-B + XRS-A flux (dual-channel)
+      - Non-thermal spectral fitting (gamma, Ec, N_nth, thermal fraction)
+      - Information-theory features (TE, MI, sample entropy, lagged xcorr)
+      - Neupert correlation, hardness ratio evolution
+      - QPP detection
     """
     d, day_event_times = args
     from bah2026.data.reader import (
@@ -170,8 +196,14 @@ def _process_day_features(
         load_solexs_pi,
         load_hel1os_lc,
         load_hel1os_spectra,
+        load_hel1os_hk,
+        load_hel1os_all_gti,
     )
-    from bah2026.data.preprocessing import align_hel1os_to_solexs
+    from bah2026.data.preprocessing import align_hel1os_to_solexs, compute_gti_mask
+    from bah2026.data.corrections import (
+        correct_solexs_deadtime,
+        subtract_hel1os_background,
+    )
     from bah2026.features.engineering import (
         extract_features_window,
         get_canonical_feature_names,
@@ -181,27 +213,51 @@ def _process_day_features(
         fit_temperature,
         fit_spectral_index,
     )
+    from bah2026.features.non_thermal import separate_thermal_non_thermal
+    import warnings
+
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     try:
         sxr = load_solexs_lc(d)
     except FileNotFoundError:
         return np.empty((0, 0)), np.array([])
 
-    counts = np.where(
+    # ── Apply deadtime correction to SoLEXS ──────────────────────
+    counts_raw = np.where(
         np.isfinite(sxr["counts"]), sxr["counts"], np.nanmedian(sxr["counts"])
     )
+    counts_corr = correct_solexs_deadtime(counts_raw)
+    deadtime_pct = float(
+        np.max(
+            np.where(counts_raw > 0, (counts_corr - counts_raw) / counts_raw * 100, 0)
+        )
+    )
+    counts = counts_corr  # Use corrected counts
     time_s = sxr["time"]
 
-    # ── Load HEL1OS LCs: ALL 4 detectors (20 bands total) ────────
+    # ── Load HEL1OS LCs: ALL 4 detectors + background subtraction ─
     aligned = {}
+    bg_fraction = 0.0
     for det, num in [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]:
         try:
             hx = load_hel1os_lc(d, detector=det, num=num)
             if hx["ctr"].size > 0:
+                # Apply background subtraction
+                ctr_corr = subtract_hel1os_background(hx["ctr"], det)
                 a = align_hel1os_to_solexs(
-                    hx["mjd"], hx["ctr"], time_s, sxr["mjdrefi"], sxr["mjdreff"]
+                    hx["mjd"], ctr_corr, time_s, sxr["mjdrefi"], sxr["mjdreff"]
                 )
                 aligned[f"{det}{num}"] = a
+                if det == "czt" and num == 1:
+                    # BG fraction for full band only (band 4 = 18-160 keV)
+                    raw_full = hx["ctr"][:, 4]
+                    bg_full = 70.0
+                    valid = raw_full > 0
+                    if np.any(valid):
+                        bg_fraction = float(
+                            np.mean(np.where(valid, bg_full / raw_full * 100, 0))
+                        )
         except Exception:
             pass
 
@@ -216,64 +272,189 @@ def _process_day_features(
     else:
         combined_hxr = None
 
+    # ── Load HEL1OS HK data ──────────────────────────────────────
+    hk_data = {}
+    try:
+        hk = load_hel1os_hk(d)
+        hk_data["hk_czt1temp"] = float(np.mean(hk.get("czt1temp", [0])))
+        hk_data["hk_czt2temp"] = float(np.mean(hk.get("czt2temp", [0])))
+        hk_data["hk_cdte1temp"] = float(np.mean(hk.get("cdte1temp", [0])))
+        hk_data["hk_cdte2temp"] = float(np.mean(hk.get("cdte2temp", [0])))
+        hk_data["hk_czthvmon"] = float(np.mean(hk.get("czthvmon", [0])))
+        hk_data["hk_cdtehvmon"] = float(np.mean(hk.get("cdtehvmon", [0])))
+        hk_data["hk_czt1satctr"] = float(np.mean(hk.get("czt1satctr1", [0])))
+        hk_data["hk_cdte1pilectr"] = float(np.mean(hk.get("cdte1pilectr", [0])))
+    except Exception:
+        for k in [
+            "hk_czt1temp",
+            "hk_czt2temp",
+            "hk_cdte1temp",
+            "hk_cdte2temp",
+            "hk_czthvmon",
+            "hk_cdtehvmon",
+            "hk_czt1satctr",
+            "hk_cdte1pilectr",
+        ]:
+            hk_data[k] = 0.0
+
     # ── SoLEXS PI → Temperature & Emission Measure ────────────────
-    pi_temp, pi_em = 0.0, 0.0
+    pi_temp, pi_em, pi_chi2 = 0.0, 0.0, 999.0
     try:
         pi = load_solexs_pi(d)
         if pi["counts"].size > 0:
             summed = np.nansum(pi["counts"][:300, :], axis=0)
             if np.sum(summed) > 100:
-                T, EM, _ = fit_temperature(summed)
+                T, EM, chi2 = fit_temperature(summed)
                 if T > 0:
-                    pi_temp, pi_em = float(T), float(EM)
+                    pi_temp, pi_em, pi_chi2 = float(T), float(EM), float(chi2)
     except Exception:
         pass
 
-    # ── HEL1OS CZT spectra → Spectral index gamma ─────────────────
-    gamma = 0.0
+    # ── HEL1OS spectra → Spectral indices from ALL 4 detectors ────
+    gamma_czt1, gamma_czt2, gamma_cdte1, gamma_cdte2 = 0.0, 0.0, 0.0, 0.0
+    nonthermal_gamma, nonthermal_ec, nonthermal_n_nth, thermal_fraction = (
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+
+    for det, num, gamma_var in [
+        ("czt", 1, "gamma_czt1"),
+        ("czt", 2, "gamma_czt2"),
+        ("cdte", 1, "gamma_cdte1"),
+        ("cdte", 2, "gamma_cdte2"),
+    ]:
+        try:
+            spec = load_hel1os_spectra(d, detector=det, num=num)
+            if spec["counts"].size > 0:
+                summed = np.nansum(spec["counts"][:100, :], axis=0)
+                if np.sum(summed) > 10:
+                    nch = len(summed)
+                    bp = max(nch // 4, 1)
+                    if det == "czt":
+                        centroids = np.array([30, 50, 70, 115], dtype=float)
+                    else:
+                        centroids = np.array([12, 25, 35, 50], dtype=float)
+                    rates = np.array(
+                        [np.sum(summed[i * bp : (i + 1) * bp]) for i in range(4)],
+                        dtype=float,
+                    )
+                    g = fit_spectral_index(np.maximum(rates, 1e-10), centroids)
+                    if det == "czt" and num == 1:
+                        gamma_czt1 = g
+                    elif det == "czt" and num == 2:
+                        gamma_czt2 = g
+                    elif det == "cdte" and num == 1:
+                        gamma_cdte1 = g
+                    elif det == "cdte" and num == 2:
+                        gamma_cdte2 = g
+        except Exception:
+            pass
+
+    # ── Non-thermal spectral fitting (from CZT1 spectra) ─────────
     try:
         spec = load_hel1os_spectra(d, detector="czt", num=1)
         if spec["counts"].size > 0:
             summed = np.nansum(spec["counts"][:100, :], axis=0)
-            if np.sum(summed) > 10:
+            if np.sum(summed) > 50:
                 nch = len(summed)
-                bp = nch // 4
-                centroids = np.array([30, 50, 70, 115], dtype=float)
-                rates = np.array(
-                    [np.sum(summed[i * bp : (i + 1) * bp]) for i in range(4)],
-                    dtype=float,
+                # Create energy grid for CZT (20-150 keV, 341 channels)
+                energies = np.linspace(20, 150, nch)
+                sep = separate_thermal_non_thermal(
+                    energies,
+                    summed,
+                    pi_temp if pi_temp > 0 else 15.0,
+                    pi_em if pi_em > 0 else 1e3,
+                    thermal_range_kev=(20, 40),
+                    nonthermal_range_kev=(40, 150),
                 )
-                gamma = fit_spectral_index(np.maximum(rates, 1e-10), centroids)
+                nonthermal_gamma = sep["gamma"]
+                nonthermal_ec = sep["ec"]
+                nonthermal_n_nth = sep["n_nth"]
+                thermal_fraction = sep["thermal_fraction"]
     except Exception:
         pass
 
-    # ── GOES XRSB flux (if netCDF cached) ────────────────────────
-    goes_mean = 0.0
+    # ── GOES XRS-B + XRS-A flux ──────────────────────────────────
+    goes_xrsb, goes_xrsa, goes_ratio = 0.0, 0.0, 0.0
     try:
-        gdir = Path(__file__).resolve().parents[3] / "data" / "external" / "goes"
+        gdir = DATA_ROOT.parent / "external" / "goes"
         for nc_file in gdir.glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
             from netCDF4 import Dataset
 
             with Dataset(str(nc_file), "r") as nc:
                 gt = nc.variables["time"][:].astype(np.float64)
-                gf = np.where(
+                # GOES time is "seconds since 2000-01-01 12:00:00 UTC"
+                # MJD of 2000-01-01 12:00:00 UTC = 51544.5
+                GOES_TIME_EPOCH_MJD = 51544.5
+                gt_mjd = GOES_TIME_EPOCH_MJD + gt / 86400.0
+                gf_b = np.where(
                     nc.variables["xrsb_flux"][:] < 0,
                     np.nan,
                     nc.variables["xrsb_flux"][:],
                 ).astype(np.float64)
-                if len(gf) > 10:
+                gf_a = np.where(
+                    nc.variables["xrsa_flux"][:] < 0,
+                    np.nan,
+                    nc.variables["xrsa_flux"][:],
+                ).astype(np.float64)
+                if len(gf_b) > 10:
                     from scipy.interpolate import interp1d
 
-                    fi = interp1d(gt, gf, bounds_error=False, fill_value=np.nan)
-                    interp = fi(time_s[:3600])
-                    goes_mean = (
-                        float(np.nanmean(interp))
-                        if np.any(np.isfinite(interp))
+                    # Convert SoLEXS MET to MJD for interpolation
+                    solexs_mjd = (sxr["mjdrefi"] + sxr["mjdreff"]) + time_s / 86400.0
+                    fi_b = interp1d(gt_mjd, gf_b, bounds_error=False, fill_value=np.nan)
+                    fi_a = interp1d(gt_mjd, gf_a, bounds_error=False, fill_value=np.nan)
+                    interp_b = fi_b(solexs_mjd[:3600])
+                    interp_a = fi_a(solexs_mjd[:3600])
+                    goes_xrsb = (
+                        float(np.nanmean(interp_b))
+                        if np.any(np.isfinite(interp_b))
                         else 0.0
                     )
+                    goes_xrsa = (
+                        float(np.nanmean(interp_a))
+                        if np.any(np.isfinite(interp_a))
+                        else 0.0
+                    )
+                    if goes_xrsb > 0:
+                        goes_ratio = goes_xrsa / goes_xrsb
             break
     except Exception:
         pass
+
+    # ── Build precomputed features dict ───────────────────────────
+    precomputed = {
+        **hk_data,
+        "hxr_spectral_index_gamma": gamma_czt1,
+        "hxr_gamma_czt2": gamma_czt2,
+        "hxr_gamma_cdte1": gamma_cdte1,
+        "hxr_gamma_cdte2": gamma_cdte2,
+        "nonthermal_gamma": nonthermal_gamma,
+        "nonthermal_ec": nonthermal_ec,
+        "nonthermal_n_nth": nonthermal_n_nth,
+        "thermal_fraction": thermal_fraction,
+        "goes_xrsb_flux": goes_xrsb,
+        "goes_xrsa_flux": goes_xrsa,
+        "goes_xrsa_xrsb_ratio": goes_ratio,
+        "deadtime_max_pct": deadtime_pct,
+        "bg_fraction_pct": bg_fraction,
+        "sxr_temperature_mk": pi_temp,
+        "sxr_emission_measure": pi_em,
+        "sxr_chi2_red": pi_chi2,
+    }
+
+    # CZT2 / CdTe2 aggregated stats from aligned data
+    if combined_hxr is not None and combined_hxr.shape[1] >= 10:
+        for prefix, start, end in [("czt2", 5, 10), ("cdte2", 15, 20)]:
+            if combined_hxr.shape[1] > start:
+                arr = combined_hxr[:, start : min(end, combined_hxr.shape[1])]
+                v = arr[np.isfinite(arr)]
+                if len(v) > 0:
+                    precomputed[f"{prefix}_total_mean"] = float(np.mean(v))
+                    precomputed[f"{prefix}_total_max"] = float(np.max(v))
+                    precomputed[f"{prefix}_total_std"] = float(np.std(v))
 
     # ── Sliding window feature extraction ─────────────────────────
     lookback, step = FEATURE_LOOKBACK_SEC, FEATURE_STEP_SEC
@@ -287,28 +468,11 @@ def _process_day_features(
             hl = combined_hxr.shape[0]
             hxr_win = combined_hxr[max(0, i - lookback) : min(hl, i)]
 
-        feat = extract_features_window(sxr_win, hxr_win, window=lookback)
+        feat = extract_features_window(
+            sxr_win, hxr_win, window=lookback, precomputed=precomputed
+        )
         if feat is None:
             continue
-
-        # Append new data-source features
-        feat["sxr_temperature_mk"] = pi_temp
-        feat["sxr_emission_measure"] = pi_em
-        feat["sxr_chi2_red"] = 0.0
-        feat["hxr_spectral_index_gamma"] = gamma
-        feat["goes_xrsb_flux"] = goes_mean
-
-        # CZT2 / CdTe2 aggregated (bands 5-9 and 15-19 of combined)
-        if combined_hxr is not None and hxr_win.shape[1] >= 10:
-            czt2 = hxr_win[:, 5:10]
-            cdte2 = hxr_win[:, 15:20] if hxr_win.shape[1] >= 20 else None
-            for prefix, arr in [("czt2", czt2), ("cdte2", cdte2)]:
-                if arr is not None:
-                    v = arr[np.isfinite(arr)]
-                    if len(v) > 0:
-                        feat[f"{prefix}_total_mean"] = float(np.mean(v))
-                        feat[f"{prefix}_total_max"] = float(np.max(v))
-                        feat[f"{prefix}_total_std"] = float(np.std(v))
 
         rows.append(pad_features_to_canonical(feat, canonical))
         t = time_s[i]

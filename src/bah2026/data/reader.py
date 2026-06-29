@@ -155,6 +155,67 @@ def load_hel1os_spectra(d: date, detector: str = "czt", num: int = 1) -> dict:
         }
 
 
+def load_hel1os_hk(d: date) -> dict:
+    """Load HEL1OS housekeeping data.
+
+    Returns detector temperatures, HV monitors, pile-up/saturation counters,
+    and sun position — 62 columns total.
+
+    From HEL1OS paper §6: HK parameters are included in Level-1 FITS.
+    Key columns:
+      - czt1temp, czt2temp, cdte1temp, cdte2temp (°C)
+      - czthvmon, cdtehvmon (V)
+      - czt1satctr1, czt2satctr1 (saturation counters)
+      - cdte1pilectr, cdte2pilectr (pile-up counters)
+      - mjd (time)
+    """
+    hk_file = _hel1os_dir(d) / "hk.fits"
+    if not hk_file.exists():
+        raise FileNotFoundError(f"No HEL1OS HK for {d}")
+    with fits.open(hk_file) as hdul:
+        data = hdul[1].data
+        cols = data.columns.names
+        result = {"columns": cols}
+        for col in cols:
+            result[col] = np.asarray(data[col], dtype=np.float64)
+        # Also keep mjd as float64
+        if "mjd" in cols:
+            result["mjd"] = np.asarray(data["mjd"], dtype=np.float64)
+        return result
+
+
+def load_hel1os_gti(d: date, detector: str = "czt", num: int = 1) -> np.ndarray:
+    """Load HEL1OS GTI for a specific detector.
+
+    Returns (N, 2) array of (tstart, tstop) in MJD.
+    From HEL1OS paper §6: GTI defines good time intervals per detector.
+    """
+    gti_file = _hel1os_dir(d) / f"gti{detector}{num}.fits"
+    if not gti_file.exists():
+        return np.zeros((0, 2))
+    with fits.open(gti_file) as hdul:
+        data = hdul[1].data
+        if len(data) == 0:
+            return np.zeros((0, 2))
+        return np.column_stack(
+            [
+                np.asarray(data["tstart"], dtype=np.float64),
+                np.asarray(data["tstop"], dtype=np.float64),
+            ]
+        )
+
+
+def load_hel1os_all_gti(d: date) -> dict[str, np.ndarray]:
+    """Load GTI for all 4 HEL1OS detectors.
+
+    Returns dict with keys 'czt1', 'czt2', 'cdte1', 'cdte2'.
+    """
+    result = {}
+    for det, num in [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]:
+        result[f"{det}{num}"] = load_hel1os_gti(d, det, num)
+    return result
+
+
 # ── Day discovery ───────────────────────────────────────────────────────
 
 
