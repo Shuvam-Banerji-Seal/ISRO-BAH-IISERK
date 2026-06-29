@@ -97,19 +97,39 @@ CNNLSTM_BATCH_SIZE = 64
 # ── Parallelism ──────────────────────────────────────────────────────────
 
 N_WORKERS = int(os.environ.get("BAH2026_WORKERS", min(os.cpu_count() or 4, 24)))
-# GPU detection
-try:
-    import torch
+# Lazy GPU detection — defer CUDA init until model training
+HAS_GPU = False
+GPU_NAME = "none"
+GPU_MEMORY_GB = 0.0
 
-    HAS_GPU = torch.cuda.is_available()
-    GPU_NAME = torch.cuda.get_device_name(0) if HAS_GPU else "none"
-    GPU_MEMORY_GB = (
-        torch.cuda.get_device_properties(0).total_memory / 1e9 if HAS_GPU else 0
-    )
-except Exception:
-    HAS_GPU = False
-    GPU_NAME = "none"
-    GPU_MEMORY_GB = 0
+
+def detect_gpu() -> None:
+    """Initialize GPU detection. Call before any GPU-accelerated code."""
+    global HAS_GPU, GPU_NAME, GPU_MEMORY_GB
+    if HAS_GPU:
+        return
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            HAS_GPU = True
+            GPU_NAME = torch.cuda.get_device_name(0)
+            GPU_MEMORY_GB = torch.cuda.get_device_properties(0).total_memory / 1e9
+    except Exception:
+        pass
+
+
+def has_gpu() -> bool:
+    """Returns True if GPU is available. Call instead of importing HAS_GPU."""
+    detect_gpu()
+    return HAS_GPU
+
+
+def gpu_info() -> tuple[str, float]:
+    """Returns (name, memory_gb). Call instead of importing GPU_NAME/MEMORY_GB."""
+    detect_gpu()
+    return GPU_NAME, GPU_MEMORY_GB
+
 
 USE_GPU = os.environ.get("BAH2026_GPU", "auto")
 

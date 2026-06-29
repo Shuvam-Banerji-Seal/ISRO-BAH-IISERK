@@ -40,9 +40,8 @@ from bah2026.config import (
     FEATURE_FORECAST_WINDOW_SEC,
     FORECAST_TRAIN_RATIO,
     FORECAST_VAL_RATIO,
-    HAS_GPU,
-    GPU_NAME,
-    GPU_MEMORY_GB,
+    has_gpu,
+    gpu_info,
     ensure_output_dirs,
 )
 
@@ -498,6 +497,11 @@ def cmd_forecast(
       - Early stopping for all models
       - Focal loss for CNN-LSTM (when PyTorch available)
     """
+    # Activate GPU for forecast (lazy — no CUDA ctx during nowcast/features)
+    from bah2026.config import detect_gpu
+
+    detect_gpu()
+
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import (
         roc_auc_score,
@@ -684,10 +688,9 @@ def main():
     print("  BAH 2026 — Challenge 15: Solar Flare Pipeline")
     print("  Aditya-L1: SoLEXS (soft X-ray) + HEL1OS (hard X-ray)")
     print("  Method: SWPC onset + HXR coincidence + LightGBM/XGBoost/CatBoost")
-    if HAS_GPU:
-        print(f"  GPU: {GPU_NAME} ({GPU_MEMORY_GB:.0f} GB) — CatBoost + CNN-LSTM")
-    else:
-        print(f"  GPU: none — using {N_WORKERS} CPU cores")
+    print(
+        f"  GPU: deferred (detected at forecast step — call bah2026.config.detect_gpu())"
+    )
     print(f"  Workers: {N_WORKERS} CPU cores")
     print("=" * 60)
 
