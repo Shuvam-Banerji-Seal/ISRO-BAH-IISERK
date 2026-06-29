@@ -160,6 +160,23 @@ _CORRECTION_FEATURES = [
 # Meta (1)
 _META_FEATURES = ["window_len"]
 
+# Causal network features (13)
+_CAUSAL_FEATURES = [
+    "causal_network_density",
+    "avg_in_degree",
+    "avg_out_degree",
+    "avg_centrality",
+    "n_feedback_loops",
+    "cycle_detected",
+    "hxr_to_sxr_lag",
+    "hxr_to_sxr_strength",
+    "sxr_to_hxr_lag",
+    "sxr_to_hxr_strength",
+    "neupert_granger_improvement",
+    "neupert_best_lag",
+    "max_mediation_proportion",
+]
+
 
 def extract_features_window(
     solexs_counts: np.ndarray,
@@ -454,6 +471,10 @@ def extract_features_window(
         # CZT2 / CdTe2
         for k in _CZT2_FEATURES + _CDTE2_FEATURES:
             f[k] = float(precomputed.get(k, 0.0))
+
+        # Causal network features
+        for k in _CAUSAL_FEATURES:
+            f[k] = float(precomputed.get(k, 0.0))
     else:
         # Fill all precomputed features with 0
         for k in (
@@ -465,6 +486,7 @@ def extract_features_window(
             + _HK_FEATURES
             + _NONTHERMAL_FEATURES
             + _CORRECTION_FEATURES
+            + _CAUSAL_FEATURES
         ):
             f[k] = 0.0
 
@@ -489,6 +511,7 @@ def get_canonical_feature_names() -> list[str]:
         + _NONTHERMAL_FEATURES
         + _QPP_FEATURES
         + _CORRECTION_FEATURES
+        + _CAUSAL_FEATURES
         + _META_FEATURES
     )
     for lag in FEATURE_AUTOCORR_LAGS:

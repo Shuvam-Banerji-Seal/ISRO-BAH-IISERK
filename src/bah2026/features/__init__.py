@@ -2,7 +2,7 @@
 
 Feature Engineering
 -------------------
-extract_features_window    — Extract 104 features from a time window
+extract_features_window    — Extract 117 features from a time window
 build_feature_matrix       — Sliding-window feature matrix over a full day
 get_canonical_feature_names — Sorted list of all canonical feature names
 pad_features_to_canonical  — Pad feature dict to match canonical list
@@ -48,6 +48,15 @@ deconvolve_spectrum         — Invert response (NNLS / Richardson-Lucy)
 effective_area_at_energy    — ARF interpolation
 counts_to_energy_flux       — Counts → erg/cm²/s
 has_caldb                   — Check CALDB availability
+
+Causal Network Analysis
+-----------------------
+granger_causality_simple        — AR-based Granger test with cross-validation
+lagged_causal_correlation       — Optimal lag search for cause→effect
+mediation_analysis              — Baron-Kenny mediation decomposition
+build_causal_network            — Directed graph across all energy bands
+extract_causal_network_features — 13 scalar features: density, cycles, lags
+get_causal_feature_names        — List of causal feature names
 """
 
 from bah2026.features.engineering import (
@@ -93,6 +102,14 @@ from bah2026.features.response_convolution import (
     counts_to_energy_flux,
     has_caldb,
 )
+from bah2026.features.causal_network import (
+    granger_causality_simple,
+    lagged_causal_correlation,
+    mediation_analysis,
+    build_causal_network,
+    extract_causal_network_features,
+    get_causal_feature_names,
+)
 
 __all__ = [
     # Feature engineering
@@ -132,4 +149,11 @@ __all__ = [
     "effective_area_at_energy",
     "counts_to_energy_flux",
     "has_caldb",
+    # Causal network
+    "granger_causality_simple",
+    "lagged_causal_correlation",
+    "mediation_analysis",
+    "build_causal_network",
+    "extract_causal_network_features",
+    "get_causal_feature_names",
 ]

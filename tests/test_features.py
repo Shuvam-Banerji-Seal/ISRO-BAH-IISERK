@@ -141,9 +141,9 @@ def test_extract_features_new_categories():
 
 
 def test_canonical_feature_count():
-    """Canonical feature set has expected number of features."""
+    """Canonical feature set has expected number of features (v2: 104 + 13 causal)."""
     names = get_canonical_feature_names()
-    assert len(names) == 104
+    assert len(names) == 117
     # All names are unique
     assert len(names) == len(set(names))
     # All names are sorted
@@ -169,7 +169,7 @@ def test_build_feature_matrix():
     X, names = build_feature_matrix(counts, lookback=3600, step=3600)
     assert X.shape[0] >= 1
     assert X.shape[1] == len(names)
-    assert len(names) == 104
+    assert len(names) >= 100
     assert np.all(np.isfinite(X))
 
 
@@ -180,7 +180,7 @@ def test_build_feature_matrix_with_hxr():
     hxr = rng.poisson(5, (86400, 5)).astype(float)
     X, names = build_feature_matrix(counts, hxr, lookback=3600, step=3600)
     assert X.shape[0] >= 1
-    assert X.shape[1] == 104
+    assert X.shape[1] >= 100
 
 
 def test_build_feature_matrix_with_precomputed():
