@@ -135,9 +135,10 @@ class FlareForecasterCatBoost:
             depth=depth or CATBOOST_DEPTH,
             auto_class_weights=auto_class_weights,
             verbose=0,
-            eval_metric="AUC",
+            eval_metric="Logloss",
             random_seed=_RANDOM_STATE,
-            thread_count=-1,  # use all CPU cores
+            thread_count=-1,  # CPU fallback
+            task_type="GPU",  # use A100 80GB when available
         )
 
     def fit(self, X_train, y_train, X_val=None, y_val=None):
