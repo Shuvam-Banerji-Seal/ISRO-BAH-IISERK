@@ -137,8 +137,8 @@ class FlareForecasterCatBoost:
             verbose=0,
             eval_metric="Logloss",
             random_seed=_RANDOM_STATE,
-            thread_count=-1,  # CPU fallback
-            task_type="GPU",  # use A100 80GB when available
+            thread_count=-1,
+            task_type="GPU",  # A100 80GB
         )
 
     def fit(self, X_train, y_train, X_val=None, y_val=None):
