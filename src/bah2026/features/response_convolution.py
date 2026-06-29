@@ -306,6 +306,15 @@ def counts_to_energy_flux(
     # Get energy grid
     energies = response["energies_lo"]
 
+    # Match flux length to energy grid
+    n_energy = len(energies)
+    if len(photon_flux) < n_energy:
+        flux_padded = np.zeros(n_energy)
+        flux_padded[: len(photon_flux)] = photon_flux
+        photon_flux = flux_padded
+    elif len(photon_flux) > n_energy:
+        photon_flux = photon_flux[:n_energy]
+
     # Integrate E * F(E) dE over the specified range
     mask = (energies >= energy_range[0]) & (energies <= energy_range[1])
     if mask.sum() < 2:
@@ -317,7 +326,18 @@ def counts_to_energy_flux(
     # Trapezoidal integration: ∫ E * F(E) dE
     # Convert keV to erg: 1 keV = 1.602e-9 erg
     KEV_TO_ERG = 1.602e-9
-    energy_flux = np.trapz(e_masked * f_masked, e_masked) * KEV_TO_ERG
+    # Use np.trapezoid (numpy 2.0+) or fallback to np.trapz
+    trapz_fn = getattr(np, "trapezoid", getattr(np, "trapz", None))
+    if trapz_fn is None:
+        # Manual trapezoidal integration
+        energy_flux = np.sum(
+            0.5
+            * np.diff(e_masked)
+            * (e_masked[:-1] * f_masked[:-1] + e_masked[1:] * f_masked[1:])
+        )
+    else:
+        energy_flux = trapz_fn(e_masked * f_masked, e_masked)
+    energy_flux *= KEV_TO_ERG
 
     return float(energy_flux)
 

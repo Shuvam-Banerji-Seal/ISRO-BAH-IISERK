@@ -510,8 +510,31 @@ def build_feature_matrix(
     hel1os_ctr: np.ndarray | None = None,
     lookback: int = 3600,
     step: int = 300,
+    precomputed: dict | None = None,
 ) -> tuple[np.ndarray, list[str]]:
-    """Build feature matrix by sliding a window over a full day."""
+    """Build feature matrix by sliding a window over a full day.
+
+    Parameters
+    ----------
+    solexs_counts : ndarray
+        Full day of SoLEXS count rates (86400,).
+    hel1os_ctr : ndarray, optional
+        HEL1OS count rates (n_times × n_bands).
+    lookback : int
+        Window size in seconds (default from config).
+    step : int
+        Step size in seconds (default from config).
+    precomputed : dict, optional
+        Day-level precomputed features (HK, spectra, GOES, corrections).
+        See extract_features_window() for expected keys.
+
+    Returns
+    -------
+    X : ndarray, shape (n_windows, n_features)
+        Feature matrix.
+    names : list[str]
+        Canonical feature names.
+    """
     from bah2026.config import FEATURE_LOOKBACK_SEC, FEATURE_STEP_SEC
 
     if lookback == 3600 and step == 300:
@@ -529,15 +552,17 @@ def build_feature_matrix(
             h_len = len(hel1os_ctr)
             hxr_win = hel1os_ctr[max(0, i - lookback) : min(h_len, i)]
 
-        feat = extract_features_window(sxr_win, hxr_win, window=lookback)
+        feat = extract_features_window(
+            sxr_win, hxr_win, window=lookback, precomputed=precomputed
+        )
         if feat is None:
             continue
         if names is None:
-            names = sorted(feat.keys())
-        rows.append([feat[k] for k in names])
+            names = get_canonical_feature_names()
+        rows.append(pad_features_to_canonical(feat, names))
 
     if not rows:
-        return np.empty((0, 0)), []
+        return np.empty((0, 0)), get_canonical_feature_names()
     X = np.array(rows, dtype=np.float32)
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     return X, names or []
