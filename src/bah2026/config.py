@@ -96,7 +96,7 @@ CNNLSTM_BATCH_SIZE = 64
 
 # ── Parallelism ──────────────────────────────────────────────────────────
 
-N_WORKERS = int(os.environ.get("BAH2026_WORKERS", min(os.cpu_count() or 4, 8)))
+N_WORKERS = int(os.environ.get("BAH2026_WORKERS", min(os.cpu_count() or 4, 24)))
 USE_GPU = os.environ.get("BAH2026_GPU", "auto")
 
 # ── Functions ────────────────────────────────────────────────────────────

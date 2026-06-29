@@ -49,6 +49,7 @@ class FlareForecasterLightGBM:
             scale_pos_weight=scale_pos_weight,
             verbose=LGBM_VERBOSE,
             random_state=_RANDOM_STATE,
+            n_jobs=-1,  # use all CPU cores
         )
 
     def fit(self, X_train, y_train, X_val=None, y_val=None):
@@ -94,6 +95,7 @@ class FlareForecasterXGBoost:
             eval_metric="auc",
             verbosity=0,
             random_state=_RANDOM_STATE,
+            n_jobs=-1,  # use all CPU cores
         )
 
     def fit(self, X_train, y_train, X_val=None, y_val=None):
@@ -135,6 +137,7 @@ class FlareForecasterCatBoost:
             verbose=0,
             eval_metric="AUC",
             random_seed=_RANDOM_STATE,
+            thread_count=-1,  # use all CPU cores
         )
 
     def fit(self, X_train, y_train, X_val=None, y_val=None):
