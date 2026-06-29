@@ -237,3 +237,74 @@ All parameters configurable via environment variables:
 ```bash
 BAH2026_DATA=/path/to/data BAH2026_WORKERS=24 python -m bah2026.scripts.run_pipeline
 ```
+
+---
+
+## 9. Instrument Corrections (v1.1)
+
+Based on SoLEXS paper (arXiv:2509.26292v2) and HEL1OS paper (arXiv:2512.12679).
+
+### 9.1 Deadtime Correction (Paralyzable Model)
+
+SoLEXS spectral chain: τ = 13.65 µs on-board, efficiency = 88.83%.
+
+| Rate (cts/s) | Correction | Notes |
+|--------------|------------|-------|
+| 100 | +0.1% | Negligible |
+| 1,000 | +1.4% | Minor |
+| 10,000 | +17.4% | Significant |
+| 20,000 | +51.0% | Half counts lost |
+| >73,260 | Saturated | Paralyzable limit |
+
+**Impact:** 3.1% of all seconds have >1% correction. X-class peaks (20k+ cts/s) lose half their counts.
+
+### 9.2 HEL1OS Background Subtraction
+
+From off-Sun pointings (paper §6): CZT ~70 cps, CdTe ~0.15 cps.
+
+| Detector | Median Rate | Background | BG Fraction |
+|----------|-------------|------------|-------------|
+| CZT1 | 134.6 cts/s | 70.0 cps | **52%** |
+| CdTe1 | 1.8 cts/s | 0.15 cps | 8.3% |
+
+**Impact:** CZT background is 52% of median rate — critical for C-class detection. All CZT-based features were contaminated.
+
+### 9.3 Auxiliary File Extraction
+
+HK, GTI, evt, dispix files extracted from raw zips (were missed by decompress.sh).
+
+| File | Count | Size | Contents |
+|------|-------|------|----------|
+| hk.fits | 398 | 1.7 MB each | 62 columns: detector temps, HV, pile-up, saturation, sun position |
+| gti*.fits | 1,592 | 8.6 KB each | GTI per detector (CZT1/2, CdTe1/2) |
+| evt.fits | 398 | 88 MB each | Per-photon events at 10ms resolution |
+| dispix.txt | 1,818 | 13 bytes each | CZT pixel configuration |
+
+### 9.4 Science Impact (Verified on 2024-05-05)
+
+| Metric | Raw | Corrected | Change |
+|--------|-----|-----------|--------|
+| Neupert ρ | -0.002 | **+0.004** | Correct direction! |
+| Transfer entropy | 0.005 | **0.066** | **14× increase** |
+| Mutual information | 0.005 | **0.119** | **27× increase** |
+| Lagged correlation | NaN | **0.583** | Was undefined |
+| HXR lead time | -100s | **-3s** | Realistic |
+
+### 9.5 HK Temperature Monitoring
+
+| Detector | Mean Temp | Std | Paper Spec |
+|----------|-----------|-----|------------|
+| CZT1 | 16.7°C | 0.9°C | +15 to +25°C ✓ |
+| CZT2 | 21.6°C | 0.5°C | +15 to +25°C ✓ |
+| CdTe1 | -40.9°C | 0.7°C | -40 to -30°C ✓ |
+| CdTe2 | -27.9°C | 0.7°C | -40 to -30°C ✓ |
+
+HV monitor: CZT = 634V, CdTe = 954V (stable).
+
+### 9.6 New Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/analyze_unused_data.py` | 10-phase comprehensive unused data analysis |
+| `scripts/extract_aux_files.py` | Extract HK/GTI/evt from raw zips |
+| `data/corrections.py` | Deadtime, background, spurious corrections |
