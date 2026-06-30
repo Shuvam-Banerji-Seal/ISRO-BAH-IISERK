@@ -4,13 +4,12 @@ BAH 2026 — Complete Pipeline Runner (v2).
 
 Runs all three phases sequentially:
   1. Nowcast  — SXR+HXR flare detection with corrections
-  2. Features — 104-feature extraction with multiprocessing + checkpointing
+  2. Features — 117-feature extraction with multiprocessing
   3. Forecast — GPU-accelerated CatBoost/LightGBM/XGBoost training
 
 Usage:
     python -m bah2026.scripts.run_full_pipeline
-    python -m bah2026.scripts.run_full_pipeline --force-nowcast
-    python -m bah2026.scripts.run_full_pipeline --skip-forecast
+    python -m bah2026.scripts.run_full_pipeline --skip-nowcast
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ import os
 import sys
 import time
 from collections import Counter
-from datetime import date
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -33,8 +31,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 os.environ.setdefault(
     "BAH2026_DATA", str(Path(__file__).resolve().parents[3] / "data" / "processed")
 )
-
-import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,91 +46,15 @@ logging.basicConfig(
 log = logging.getLogger("bah2026")
 
 
-# ── Phase 1: Nowcast ───────────────────────────────────────────────────
-
-
-def phase_nowcast() -> pd.DataFrame:
-    from bah2026.data import discover_combined_days
-    from bah2026.data.reader import (
-        load_solexs_lc,
-        load_hel1os_lc,
-        load_solexs_gti,
-        load_hel1os_gti,
-    )
-    from bah2026.data.preprocessing import compute_gti_mask, forward_fill_nan
-    from bah2026.data.corrections import (
-        correct_solexs_deadtime,
-        subtract_hel1os_background,
-    )
-    from bah2026.data.calibration import solexs_counts_to_irradiance_simple
-    from bah2026.models.nowcasting import (
-        detect_flares_swpc,
-        detect_flares_hel1os,
-        coincidence_merge,
-    )
-
-    def _worker(args):
-        d, _ = args
-        try:
-            solexs = load_solexs_lc(d)
-            counts = solexs["counts"].copy()
-            gti = load_solexs_gti(d)
-            if len(gti) > 0:
-                counts[~compute_gti_mask(solexs["time"], gti)] = np.nan
-            counts = correct_solexs_deadtime(forward_fill_nan(counts))
-            flux = solexs_counts_to_irradiance_simple(counts)
-            sxr_events = detect_flares_swpc(flux, solexs["time"])
-            hxr_events = []
-            for det, num in [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]:
-                try:
-                    hel = load_hel1os_lc(d, detector=det, num=num)
-                    if hel["ctr"].size > 0:
-                        ctr = subtract_hel1os_background(hel["ctr"], det)
-                        hel_gti = load_hel1os_gti(d, det, num)
-                        if len(hel_gti) > 0:
-                            m = np.zeros(len(hel["mjd"]), dtype=bool)
-                            for gs, ge in hel_gti:
-                                m |= (hel["mjd"] >= gs) & (hel["mjd"] <= ge)
-                            ctr[~m] = 0.0
-                        for e in detect_flares_hel1os(
-                            ctr, hel["mjd"], sigma=5.0, min_duration_sec=60
-                        ):
-                            e["detector"] = f"{det}{num}"
-                            hxr_events.append(e)
-                except Exception:
-                    pass
-            events = coincidence_merge(sxr_events, hxr_events)
-            for e in events:
-                e["date"] = str(d)
-                e["goes_class"] = e.get("goes_class", "?")
-            return events
-        except Exception:
-            return []
-
-    days = discover_combined_days()
-    log.info(f"Nowcast: {len(days)} days")
-    t0 = time.time()
-    with Pool(24) as pool:
-        results = list(pool.imap(_worker, [(d, "") for d in days], chunksize=4))
-    all_events = [e for r in results for e in r]
-    log.info(f"Time: {time.time() - t0:.0f}s, events: {len(all_events)}")
-    df = pd.DataFrame(all_events) if all_events else pd.DataFrame()
-    from bah2026.config import CATALOGS_DIR
-
-    CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(CATALOGS_DIR / "nowcast_catalogue.csv", index=False)
-    classes = Counter(df["goes_class"]) if "goes_class" in df.columns else Counter()
-    for c in ["X", "M", "C", "B", "A"]:
-        if classes.get(c):
-            log.info(f"  {c}: {classes[c]}")
-    return df
-
-
-# ── Phase 2: Features ──────────────────────────────────────────────────
-
-
 def _feature_worker(args):
     d, event_times, hdf5_dir = args
+    try:
+        return _feature_worker_inner(d, event_times, hdf5_dir)
+    except Exception:
+        return None
+
+
+def _feature_worker_inner(d, event_times, hdf5_dir):
     from bah2026.data.reader import (
         load_solexs_lc,
         load_solexs_pi,
@@ -155,7 +75,6 @@ def _feature_worker(args):
     from bah2026.features.spectral_fitting import fit_temperature, fit_spectral_index
     from bah2026.features.non_thermal import separate_thermal_non_thermal
     from scipy.interpolate import interp1d
-    from pathlib import Path
     import numpy as np
     import warnings
 
@@ -199,16 +118,7 @@ def _feature_worker(args):
             pass
 
     hxr_parts = [aligned[k] for k in ["czt1", "czt2", "cdte1", "cdte2"] if k in aligned]
-    combined_hxr = (
-        np.hstack(
-            [
-                a[: min(len(a), *(len(aligned[k]) for k in aligned))]
-                for a in [hxr_parts[0]]
-            ]
-        )
-        if hxr_parts
-        else None
-    )
+    combined_hxr = None
     if hxr_parts:
         ml = min(a.shape[0] for a in hxr_parts)
         combined_hxr = np.hstack([a[:ml] for a in hxr_parts])
@@ -262,9 +172,7 @@ def _feature_worker(args):
         if pi["counts"].size > 0:
             summed = np.nansum(pi["counts"][:300, :], axis=0)
             if np.sum(summed) > 100:
-                from bah2026.features.spectral_fitting import fit_temperature as _fit_T
-
-                T, EM, chi2 = _fit_T(summed)
+                T, EM, chi2 = fit_temperature(summed)
                 if T > 0:
                     precomputed["sxr_temperature_mk"] = float(T)
                     precomputed["sxr_emission_measure"] = float(EM)
@@ -321,7 +229,7 @@ def _feature_worker(args):
         pass
 
     try:
-        gdir = Path(__file__).resolve().parents[3] / "data" / "external" / "goes"
+        gdir = Path(hdf5_dir).parents[2] / "data" / "external" / "goes"
         for nc_file in gdir.glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
             from netCDF4 import Dataset
 
@@ -440,12 +348,8 @@ def phase_features(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, list[str]]
     return X, y, canonical
 
 
-# ── Phase 3: Forecast ──────────────────────────────────────────────────
-
-
 def phase_forecast(X, y, fnames):
     from bah2026.config import (
-        HDF5_DIR,
         CATALOGS_DIR,
         FORECAST_TRAIN_RATIO,
         FORECAST_VAL_RATIO,
@@ -507,9 +411,7 @@ def phase_forecast(X, y, fnames):
                     best_tss, best_thr = tss, thr
         pred = (prob > best_thr).astype(int)
         tn, fp, fn, tp = confusion_matrix(yte, pred).ravel()
-        tpr = tp / max(tp + fn, 1)
-        fpr = fp / max(fp + tn, 1)
-        tss = tpr - fpr
+        tss = tp / max(tp + fn, 1) - fp / max(fp + tn, 1)
         hss_num, hss_den = (
             2 * (tp * tn - fp * fn),
             (tp + fn) * (fn + tn) + (tp + fp) * (fp + tn),
@@ -548,48 +450,33 @@ def phase_forecast(X, y, fnames):
     return results
 
 
-# ── Main ────────────────────────────────────────────────────────────────
-
-
 def main():
     parser = argparse.ArgumentParser(description="BAH 2026 v2 — Complete Pipeline")
-    parser.add_argument(
-        "--force-nowcast",
-        action="store_true",
-        help="Re-run nowcast even if catalogue exists",
-    )
-    parser.add_argument(
-        "--skip-forecast", action="store_true", help="Skip forecasting phase"
-    )
-    parser.add_argument(
-        "--skip-nowcast", action="store_true", help="Skip nowcasting phase"
-    )
+    parser.add_argument("--skip-forecast", action="store_true")
+    parser.add_argument("--skip-nowcast", action="store_true")
     args = parser.parse_args()
 
     log.info("=" * 60)
-    log.info("BAH 2026 v2 Pipeline — 104 features, all corrections")
+    log.info("BAH 2026 v2 Pipeline — 117 features, all corrections")
     log.info("=" * 60)
 
-    from bah2026.config import CATALOGS_DIR, HDF5_DIR, ensure_output_dirs
+    from bah2026.config import CATALOGS_DIR, ensure_output_dirs
 
     ensure_output_dirs()
 
     df = pd.DataFrame()
     if not args.skip_nowcast:
-        csv = CATALOGS_DIR / "nowcast_catalogue.csv"
-        if csv.exists() and not args.force_nowcast:
-            df = pd.read_csv(csv)
-            log.info(f"[1/3] Nowcast: loaded {len(df)} events from cache")
-        else:
-            log.info("[1/3] Nowcast")
-            df = phase_nowcast()
+        log.info("[1/3] Nowcast")
+        from bah2026.main import cmd_nowcast
+        from bah2026.data import discover_combined_days
+
+        df = cmd_nowcast(discover_combined_days())
     else:
         csv = CATALOGS_DIR / "nowcast_catalogue.csv"
         if csv.exists():
             df = pd.read_csv(csv)
             log.info(f"Nowcast: loaded {len(df)} events from cache")
 
-    X, y, fnames = None, None, []
     log.info("[2/3] Features")
     X, y, fnames = phase_features(df)
 
