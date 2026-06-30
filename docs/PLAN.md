@@ -35,6 +35,15 @@
 8. [Data Analysis & Visualization Products](#8-data-analysis--visualization-products)
 9. [Timeline & Milestones](#9-timeline--milestones)
 10. [References](#10-references)
+11. [V2 Post-Mortem](#11-v2-post-mortem--what-works-what-doesnt)
+    - 11.1 Current Results, 11.2 Critical Bugs, 11.3 Architectural Limitations, 11.4 Data Utilization Audit
+12. [V3 Architecture — Rigorous Improvement Plan](#12-v3-architecture--rigorous-improvement-plan)
+    - 12.1 Design Philosophy, 12.2 Track A (GBDT), 12.3 Track B (CNN-LSTM), 12.4 Track C (Transformer), 12.5 Ensemble, 12.6 Evaluation
+13. [GPU-Optimized Implementation](#13-gpu-optimized-implementation)
+14. [Implementation Roadmap](#14-implementation-roadmap)
+15. [Expected TSS Trajectory](#15-expected-tss-trajectory)
+16. [Risk Assessment](#16-risk-assessment)
+17. [Novel Contributions Status](#17-novel-contributions-status)
 
 ---
 
@@ -1163,3 +1172,799 @@ Multi-tier alert system with configurable thresholds:
 ---
 
 *Plan prepared: June 2026 | GPU: NVIDIA A100 80GB | Framework: PyTorch 2.x + Lightning*
+
+---
+---
+
+# V3 IMPROVEMENT PLAN — Pushing TSS from 0.412 → 0.70+
+
+*Updated: June 30, 2026 | Post-v2 analysis | Target: TSS ≥ 0.70*
+
+---
+
+## 11. V2 Post-Mortem — What Works, What Doesn't
+
+### 11.1 Current Results (v2)
+
+| Model | TSS | HSS | AUC-ROC | AUC-PR | F1 | Train Time |
+|-------|-----|-----|---------|--------|----|------------|
+| CatBoost (GPU) | **0.412** | 0.110 | 0.795 | 0.167 | 0.160 | 40s |
+| XGBoost (CPU) | 0.371 | 0.085 | 0.783 | 0.181 | 0.138 | 108s |
+| LightGBM (CPU) | 0.331 | 0.067 | 0.736 | 0.110 | 0.122 | 7s |
+
+**Dataset:** 199,824 samples × 117 features, 6.0% positive rate, 724 days,
+chronological 70/15/15 split. Nowcast catalogue: 2,324 events (148 X, 1,422 M, 753 C).
+
+### 11.2 Critical Bugs Identified
+
+| # | Bug | Location | Impact | Fix |
+|---|-----|----------|--------|-----|
+| B1 | **Granger causality typo** | `causal_network.py:99` — `y_f_train` should be `y_train` | Full model trained on wrong variable → ALL Granger results invalid → 2 features always 0 | Fix variable name |
+| B2 | **Causal features computed at day-level, not per-window** | `run_full_pipeline.py` — causal features in `precomputed` dict | All 276 windows/day get identical causal features → temporal resolution lost | Compute causal network per-window inside `extract_features_window` |
+| B3 | **`neupert_granger_improvement` and `neupert_best_lag` never computed** | `run_full_pipeline.py` — in `precomputed` defaults but never set | 2 features always 0.0 | Call `granger_causality_simple(HXR, dSXR/dt)` in worker |
+| B4 | **Transfer entropy downsampled to 60s bins** | `engineering.py:347` — `step_ds = 60` | Loses 1–60s precursor signals (Neupert delay is 1–60s) | Use 10s bins, or compute on full 1s signal with GPU |
+| B5 | **Sample entropy limited to 200 points of downsampled signal** | `engineering.py:364` — `sxr_ds[:200]` | Only 3.3 min of 60s-binned data → poor complexity estimate | Use full window, GPU-accelerated |
+| B6 | **`max_mediation_proportion` never computed** | `causal_network.py` — function exists but not called | 1 feature always 0.0 | Call `mediation_analysis()` in worker |
+| B7 | **QPP detection on HXR full-band only** | `engineering.py:417` — `hxr_full[:ml]` | Misses band-specific QPP (e.g., 20–40 keV QPP vs 80–150 keV QPP) | Run QPP on 3 key bands |
+| B8 | **GOES data only used as day-mean** | `run_full_pipeline.py:248` — `np.nanmean(interp[:3600])` | Discards GOES time series structure | Interpolate GOES to 1s cadence, use as 12th channel |
+
+### 11.3 Architectural Limitations
+
+| # | Limitation | Impact | Solution |
+|---|------------|--------|----------|
+| L1 | **Flat features → GBDT** — 117 numbers per window, temporal structure lost | Model can't learn "SXR rising for 10 min then HXR spike" patterns | Sequence-based DL (CNN-LSTM, Transformer) |
+| L2 | **Single-scale** — only 3600s window | Misses short (5 min) and long (60 min) precursors | Multi-scale temporal features (300s + 900s + 3600s) |
+| L3 | **No temporal derivatives** — dSXR/dt, dHXR/dt, d²SXR/dt² absent | The Neupert effect IS about dSXR/dt ∝ HXR — we're missing the key physics | Add derivative feature sets |
+| L4 | **No data augmentation** — 6% positive, no augmentation | Model struggles with minority class | Mixup, time-shift, noise injection, SMOTE |
+| L5 | **No feature selection** — 117 features, many near-zero importance | Noise degrades GBDT performance | SHAP-based selection, keep top 60–80 |
+| L6 | **No hyperparameter optimization** — fixed CatBoost params | Suboptimal model | Optuna (100 trials, TSS objective) |
+| L7 | **No ensemble** — 3 models trained independently | No synergistic gain | Stacking: GBDT + CNN-LSTM + Transformer |
+| L8 | **No temporal cross-validation** — single chronological split | High variance in TSS estimate | Rolling-origin CV (5 folds) |
+| L9 | **CNN-LSTM implemented but never trained** | `forecasting.py:185–283` | Wasted GPU potential | Train on sequence data |
+| L10 | **No physics-informed loss** | Missing PLAN.md N2 novelty | Implement Neupert loss |
+
+### 11.4 Data Utilization Audit
+
+| Data Source | Available | Currently Used | Utilization |
+|-------------|-----------|----------------|-------------|
+| SoLEXS LC (1s, 86400/day) | 747 days | SXR stats per 5-min window | ~30% (stats only, no raw sequence) |
+| SoLEXS PI (340ch × 86400 spectra) | 330 GB | Day-level T, EM, chi2 (3 features) | **<2%** — 330 GB barely touched |
+| HEL1OS LC (4 det × 5 bands × 1s) | 927 days | 30 band stats per window | ~40% (stats only, no raw sequence) |
+| HEL1OS Spectra (4 det, 20s accumulation) | 88 GB | 4 day-level spectral indices | **<5%** |
+| HEL1OS HK (62 columns) | 927 days | 8 features (4 temps, 2 HV, 2 counters) | ~13% |
+| GOES XRS-A/B (1-min, 468 files) | 468 days | 3 features (day-mean A, B, ratio) | **<5%** — no time series |
+| GOES Flare Catalog | 317 KB CSV | Not used at all | **0%** |
+| Non-thermal fit | Per day | 4 features (γ, Ec, N_nth, thermal_frac) | ~20% (day-level only) |
+| QPP detection | Per window | 4 features (detected, period, amp, sig) | ~50% (single band only) |
+| Causal network | Per day (bug) | 13 features (mostly zeros due to bugs) | **<10%** — needs per-window + bug fixes |
+| **Overall data utilization** | | | **~15–20%** |
+
+---
+
+## 12. V3 Architecture — Rigorous Improvement Plan
+
+### 12.1 Design Philosophy
+
+The v2 pipeline extracts 117 flat statistical features per 5-minute window and feeds
+them to gradient-boosted trees. This approach has a fundamental ceiling: **GBDT models
+cannot learn temporal patterns within a window**. A 3600-second window contains rich
+temporal structure (rise patterns, precursors, QPP oscillations, Neupert delays) that
+is completely lost when reduced to mean/std/max/skew.
+
+The v3 architecture introduces **three parallel model tracks** that are ensembled:
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │           V3 ENSEMBLE ARCHITECTURE       │
+                    └─────────────────────────────────────────┘
+
+  Raw Data ──┬── Track A: GBDT (v2 improved)   ──┐
+             │   150+ flat features, Optuna-tuned │
+             │   Multi-scale, derivatives, fixed  │
+             │   bugs, feature selection           │
+             │                                     ├──→ Stacking
+             ├── Track B: CNN-LSTM (sequence)     │    Meta-Learner
+             │   Raw 12-channel × 3600s input     │    (Logistic
+             │   Focal loss, mixed precision       │     Regression)
+             │   GPU training, 50 epochs           │
+             │                                     │
+             └── Track C: Spectral-Temporal       ──┘
+                 Transformer (novel N3)
+                 Cross-attention: energy ↔ time
+                 Physics-informed Neupert loss (N2)
+                 Self-supervised MAE pretrain (N6)
+                 GPU training, 100 epochs
+```
+
+### 12.2 Track A — Improved GBDT (Quick Win: TSS 0.412 → 0.50)
+
+**Rationale:** Fastest path to improvement. Fix bugs, add features, optimize hyperparams.
+
+#### 12.2.1 Bug Fixes (B1–B8)
+
+1. **Fix Granger causality** (`causal_network.py:99`):
+   ```python
+   # BUG: model_f = RidgeCV(...).fit(Xf_train, y_f_train)  # y_f_train undefined!
+   # FIX: model_f = RidgeCV(...).fit(Xf_train, y_train)
+   ```
+
+2. **Compute causal features per-window** (not day-level):
+   - Move `extract_causal_network_features()` call into `extract_features_window()`
+   - Build band_data dict from the SXR + HXR window arrays
+   - Use 12 bands: SXR_2_22, CZT_20_40, CZT_40_60, ..., CdTe_1.8_90, GOES_A, GOES_B
+
+3. **Compute neupert_granger_improvement**:
+   ```python
+   gc = granger_causality_simple(hxr_full[:ml], np.diff(sxr_win), max_lag=60)
+   precomputed["neupert_granger_improvement"] = gc["improvement"]
+   precomputed["neupert_best_lag"] = gc["best_lag"]
+   ```
+
+4. **Compute max_mediation_proportion**:
+   ```python
+   med = mediation_analysis(hxr_40_60, cdte_20_30, sxr_win)
+   precomputed["max_mediation_proportion"] = med["mediation_proportion"]
+   ```
+
+5. **Increase transfer entropy resolution**: 60s → 10s bins
+6. **Full-window sample entropy**: Use GPU-accelerated computation
+7. **Multi-band QPP**: Run on CZT 20–40, CdTe 5–20, and full band
+8. **GOES time series**: Interpolate to 1s, compute rolling stats + derivatives
+
+#### 12.2.2 New Feature Groups
+
+**Temporal Derivatives (12 features):**
+| Feature | Description |
+|---------|-------------|
+| `dsxr_dt_mean` | Mean of dSXR/dt |
+| `dsxr_dt_std` | Std of dSXR/dt |
+| `dsxr_dt_max` | Max positive derivative (rise speed) |
+| `dsxr_dt_min` | Max negative derivative (decay speed) |
+| `d2sxr_dt2_mean` | Mean acceleration d²SXR/dt² |
+| `d2sxr_dt2_std` | Std of acceleration |
+| `dhxr_dt_mean` | Mean of dHXR/dt |
+| `dhxr_dt_std` | Std of dHXR/dt |
+| `dhxr_dt_max` | Max HXR rise rate (impulsive onset) |
+| `dhr_dt_mean` | Mean of d(HR)/dt (hardening rate) |
+| `dhr_dt_max` | Max hardening rate |
+| `dsxr_dhxr_ratio_mean` | Mean ratio dSXR/dt ÷ HXR (Neupert efficiency η) |
+
+**Multi-Scale Temporal (24 features):**
+| Scale | Features |
+|-------|----------|
+| 300s (5 min) | sxr_mean_5m, sxr_std_5m, sxr_max_5m, hxr_mean_5m, hxr_std_5m, hxr_max_5m |
+| 900s (15 min) | sxr_mean_15m, sxr_std_15m, sxr_max_15m, hxr_mean_15m, hxr_std_15m, hxr_max_15m |
+| 1800s (30 min) | sxr_mean_30m, sxr_std_30m, sxr_max_30m, hxr_mean_30m, hxr_std_30m, hxr_max_30m |
+| Cross-scale | sxr_5m_to_60m_ratio, hxr_5m_to_60m_ratio, sxr_acceleration_trend, hxr_acceleration_trend, sxr_15m_slope, hxr_15m_slope |
+
+**GOES Time Series (8 features):**
+| Feature | Description |
+|---------|-------------|
+| `goes_xrsb_ddt_max` | Max GOES-B derivative (flare onset speed) |
+| `goes_xrsb_rolling_std_300s` | 5-min rolling std of GOES-B |
+| `goes_xrsb_rolling_std_1800s` | 30-min rolling std of GOES-B |
+| `goes_xrsa_rolling_mean_300s` | 5-min rolling mean GOES-A |
+| `goes_class_current` | Current GOES class (log scale) |
+| `goes_xrsb_gradient_1h` | 1-hour linear trend slope |
+| `goes_flare_history_24h` | Number of flares in past 24h (from catalog) |
+| `goes_xrsb_prev_peak_ratio` | Ratio of current flux to previous flare peak |
+
+**Per-Window Spectral (8 features):**
+| Feature | Description |
+|-------|-------------|
+| `sxr_temp_window` | Temperature from PI spectrum summed over window |
+| `sxr_em_window` | Emission measure from window PI |
+| `sxr_gamma_window` | Spectral slope from window PI |
+| `hxr_gamma_window_czt1` | CZT1 spectral index from window spectra |
+| `hxr_gamma_window_cdte1` | CdTe1 spectral index from window spectra |
+| `shs_index` | Soft-Hard-Soft indicator: γ(now) − γ(15min ago) |
+| `spectral_hardening_rate` | dγ/dt over the window |
+| `nonthermal_fraction_window` | Non-thermal flux / total flux in window |
+
+**Wavelet Scalogram (10 features):**
+| Feature | Description |
+|-------|-------------|
+| `wavelet_energy_10_30s` | Wavelet power in 10–30s period band |
+| `wavelet_energy_30_60s` | Wavelet power in 30–60s period band |
+| `wavelet_energy_60_120s` | Wavelet power in 60–120s period band |
+| `wavelet_energy_120_300s` | Wavelet power in 120–300s period band |
+| `wavelet_energy_300_600s` | Wavelet power in 300–600s period band |
+| `wavelet_peak_period` | Period of maximum wavelet power |
+| `wavelet_peak_significance` | Significance of peak (vs red noise) |
+| `wavelet_spectral_entropy` | Entropy of wavelet power distribution |
+| `wavelet_hxr_energy_30_120s` | HXR wavelet power 30–120s (QPP band) |
+| `wavelet_cross_power_sxr_hxr` | Cross-wavelet power SXR×HXR |
+
+**Total new features: 62 → 117 + 62 = 179 features (before selection)**
+
+#### 12.2.3 Feature Selection
+
+1. Train CatBoost with all 179 features
+2. Compute SHAP values on validation set
+3. Rank features by mean |SHAP|
+4. Remove features with mean |SHAP| < 0.001
+5. Keep top 60–80 features (reduces noise, speeds training)
+6. Re-train with selected features
+
+#### 12.2.4 Hyperparameter Optimization (Optuna)
+
+```python
+def objective(trial):
+    params = {
+        "iterations": trial.suggest_int("iterations", 500, 3000),
+        "depth": trial.suggest_int("depth", 4, 10),
+        "learning_rate": trial.suggest_float("lr", 0.01, 0.1, log=True),
+        "l2_leaf_reg": trial.suggest_float("l2", 1, 10),
+        "bagging_temperature": trial.suggest_float("bagging", 0, 1),
+        "random_strength": trial.suggest_float("rs", 0, 1),
+        "border_count": trial.suggest_int("bc", 32, 255),
+    }
+    # 5-fold rolling-origin CV, optimize TSS
+    ...
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=100)
+```
+
+**Expected: TSS 0.50–0.55** (bug fixes + features + Optuna)
+
+### 12.3 Track B — CNN-LSTM Sequence Model (TSS 0.50 → 0.60)
+
+**Rationale:** The temporal structure within each 3600s window is the richest signal
+source. GBDT can't see it; CNN-LSTM can.
+
+#### 12.3.1 Sequence Data Preparation
+
+Instead of flat features, prepare **raw multi-channel time series**:
+
+| Channel | Source | Processing |
+|---------|--------|------------|
+| 0 | SoLEXS SXR (2–22 keV) | Deadtime-corrected, 1s cadence |
+| 1 | CZT1 band 20–40 keV | Background-subtracted, 1s |
+| 2 | CZT1 band 40–60 keV | Background-subtracted, 1s |
+| 3 | CZT1 band 60–80 keV | Background-subtracted, 1s |
+| 4 | CZT1 band 80–150 keV | Background-subtracted, 1s |
+| 5 | CdTe1 band 5–20 keV | Background-subtracted, 1s |
+| 6 | CdTe1 band 20–30 keV | Background-subtracted, 1s |
+| 7 | CdTe1 band 30–40 keV | Background-subtracted, 1s |
+| 8 | CZT1 full band 18–160 keV | Background-subtracted, 1s |
+| 9 | GOES XRS-B | Interpolated to 1s |
+| 10 | GOES XRS-A | Interpolated to 1s |
+| 11 | Derived: dSXR/dt | Numerical derivative of channel 0 |
+
+**Input tensor:** `(batch, 12, 3600)` — 12 channels × 3600 time steps
+
+**Storage:** Memory-mapped numpy arrays:
+- `X_seq.npy`: (N_windows, 12, 3600) float32 → ~31 GB for 200k windows
+- `y_seq.npy`: (N_windows,) int8
+
+**GPU loading:** `DataLoader(num_workers=8, pin_memory=True, prefetch_factor=4)`
+
+#### 12.3.2 CNN-LSTM Architecture (Improved)
+
+```
+Input: (B, 12, 3600)
+  │
+  ├── Conv1D(32, k=7, pad=3) → BatchNorm → GELU → MaxPool(4)    → (B, 32, 900)
+  ├── Conv1D(64, k=5, pad=2) → BatchNorm → GELU → MaxPool(4)    → (B, 64, 225)
+  ├── Conv1D(128, k=3, pad=1) → BatchNorm → GELU → MaxPool(3)   → (B, 128, 75)
+  ├── Conv1D(256, k=3, pad=1) → BatchNorm → GELU → AdaptiveAvgPool(32) → (B, 256, 32)
+  │
+  ├── Bidirectional LSTM(256, 2 layers, dropout=0.3)             → (B, 32, 512)
+  ├── Temporal Attention(512) → LayerNorm                        → (B, 512)
+  ├── FC(256) → GELU → Dropout(0.4) → FC(128) → GELU → Dropout(0.3)
+  └── FC(1) → Sigmoid                                            → (B,)
+```
+
+**Key improvements over v2 CNN-LSTM:**
+- 4 conv layers (was 3), wider channels (was 32→64→128)
+- GELU activation (was ReLU) — smoother gradients
+- Bidirectional LSTM (was unidirectional)
+- Temporal attention (was just last hidden state)
+- Larger hidden sizes (256 vs 64)
+- Proper dropout (0.3–0.4)
+
+#### 12.3.3 Training Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Optimizer | AdamW (lr=1e-3, weight_decay=1e-4) |
+| Scheduler | CosineAnnealingWarmRestarts(T_0=10, T_mult=2) |
+| Loss | Focal Loss (γ=2.0, α=0.25, tunable) |
+| Batch size | 256 (A100 80GB, bfloat16) |
+| Epochs | 50 (with early stopping, patience=10) |
+| Mixed precision | bfloat16 (torch.cuda.amp) |
+| Gradient clipping | max_norm=1.0 |
+| Class weight | pos_weight = (neg/pos) ≈ 16 |
+| Data augmentation | Time-shift ±60s, Gaussian noise σ=0.01×std, Mixup α=0.2 |
+| Validation | Rolling-origin (5 folds) |
+| GPU memory | ~8 GB (model + activations + gradients) |
+
+**Expected: TSS 0.55–0.62**
+
+### 12.4 Track C — Spectral-Temporal Transformer (Novel, TSS → 0.65+)
+
+**Rationale:** The transformer's self-attention can learn long-range temporal
+dependencies and the cross-attention can discover which energy bands are most
+predictive. This is our key novel contribution (PLAN.md N3).
+
+#### 12.4.1 Architecture
+
+```
+Input: X ∈ ℝ^{B × T × E}   (B=batch, T=360 time steps @ 10s, E=12 energy channels)
+  │
+  ┌─────────── Temporal Branch ───────────┐
+  │ Linear(E → d_model=256)              │
+  │ Pos encoding (sinusoidal, T positions)│
+  │ TransformerEncoder(4 layers, 8 heads) │
+  │   self-attn over T dimension          │
+  │ Output: Z_t ∈ ℝ^{B × T × 256}        │
+  └───────────────────────────────────────┘
+  │
+  ┌─────────── Spectral Branch ───────────┐
+  │ Linear(T → d_model=256)              │  (transpose: treat energy as tokens)
+  │ Pos encoding (learned, E positions)   │
+  │ CrossAttention:                       │
+  │   Q = E_tokens (B×E×256)             │
+  │   K, V = Z_t (B×T×256)               │
+  │ Output: Z_s ∈ ℝ^{B × E × 256}        │
+  └───────────────────────────────────────┘
+  │
+  ┌─────────── Fusion ────────────────────┐
+  │ Z_t_pooled = AvgPool(Z_t) → (B, 256) │
+  │ Z_s_pooled = AvgPool(Z_s) → (B, 256) │
+  │ Z_fused = LayerNorm(Z_t_pooled + Z_s_pooled + Concat) → (B, 512) │
+  │ CLS token: learnable (B, 256)        │
+  │ FC(256) → GELU → Dropout(0.3) → FC(1)│
+  └───────────────────────────────────────┘
+  │
+  Output: p(flare in next 30 min) ∈ (B, 1)
+```
+
+**Downsampling:** 1s → 10s cadence (sum 10 samples) for tractable sequence length
+T=360 (1 hour). This reduces attention complexity from O(3600²) to O(360²).
+
+**Parameters:** ~8M (4 transformer layers × 256 d_model × 8 heads)
+
+#### 12.4.2 Physics-Informed Neupert Loss (Novel N2)
+
+```python
+class NeupertLoss(nn.Module):
+    """Physics-informed loss embedding the Neupert effect.
+
+    L = L_focal + λ_phys · L_neupert
+
+    L_neurent = ||dSXR/dt - η · HXR(t - τ)||²
+
+    where η (evaporation efficiency) and τ (time delay) are
+    learnable parameters, and the loss is weighted by the
+    predicted flare probability (Neupert effect only holds
+    during flares).
+    """
+    def __init__(self, gamma=2.0, alpha=0.25, lambda_phys=0.1):
+        super().__init__()
+        self.focal = FocalLoss(gamma, alpha)
+        self.eta = nn.Parameter(torch.tensor(0.5))   # learnable
+        self.tau = nn.Parameter(torch.tensor(30))     # learnable (seconds)
+        self.lambda_phys = lambda_phys
+
+    def forward(self, pred_prob, target, sxr_seq, hxr_seq):
+        # Classification loss
+        loss_cls = self.focal(pred_prob, target)
+
+        # Physics loss (only for flare samples)
+        dsxr_dt = sxr_seq[:, 1:] - sxr_seq[:, :-1]  # dSXR/dt
+        tau_idx = int(self.tau.item() / 10)  # convert to 10s index
+        hxr_shifted = torch.roll(hxr_seq, shifts=tau_idx, dims=1)
+        residual = dsxr_dt - self.eta * hxr_shifted[:, :-1]
+        loss_phys = (residual ** 2).mean()
+
+        # Weight by predicted probability (Neupert only during flares)
+        loss_phys_weighted = loss_phys * pred_prob.detach().mean()
+
+        return loss_cls + self.lambda_phys * loss_phys_weighted
+```
+
+**Key physics:** The Neupert effect states that the rate of change of soft X-ray
+flux equals the hard X-ray flux (up to a proportionality constant and time delay).
+By embedding this in the loss, the model is forced to learn representations that
+are physically consistent — not just statistically correlated.
+
+#### 12.4.3 Self-Supervised MAE Pretraining (Novel N6)
+
+**Phase 1: Pretrain on all 724 days (unsupervised):**
+
+```
+Masked Autoencoder:
+  - Input: (B, 12, 360) — 12 channels × 360 time steps @ 10s
+  - Mask 50% of time steps randomly
+  - Encoder: TransformerEncoder(6 layers, 256 d_model, 8 heads)
+  - Decoder: TransformerDecoder(4 layers, 128 d_model, 4 heads)
+  - Loss: MSE on masked positions only
+  - Train: 50 epochs, batch=512, ~24h on A100
+  - Output: Pretrained encoder weights
+```
+
+**Phase 2: Fine-tune for flare forecasting:**
+- Load pretrained encoder into Temporal Branch of Transformer
+- Fine-tune with Neupert-informed loss
+- Only spectral branch + fusion head train from scratch
+- 30 epochs (was 100 from scratch) → faster convergence, better features
+
+**Why this works:** The MAE learns the "language" of solar X-ray variability —
+quiescent patterns, flare onset signatures, decay profiles, QPP oscillations —
+without needing labels. This representation transfers to the supervised task.
+
+#### 12.4.4 Training Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Optimizer | AdamW (lr=5e-4, weight_decay=0.01) |
+| Scheduler | OneCycleLR (max_lr=5e-4, pct_start=0.1) |
+| Loss | Focal + Neupert physics (λ_phys=0.1) |
+| Batch size | 512 (A100 80GB, bfloat16) |
+| Epochs (from scratch) | 100 (early stopping patience=15) |
+| Epochs (from MAE) | 30 |
+| Mixed precision | bfloat16 |
+| Attention | FlashAttention (torch SDPA) |
+| Gradient clipping | max_norm=0.5 |
+| Label smoothing | 0.05 |
+| Data augmentation | Time-shift, noise, channel dropout (2 of 12) |
+
+**Expected: TSS 0.62–0.70**
+
+### 12.5 Ensemble & Stacking (TSS → 0.70+)
+
+#### 12.5.1 Three-Model Stacking
+
+```
+Track A (GBDT)  ──→ p_A ∈ [0, 1]  ──┐
+Track B (CNN-LSTM) → p_B ∈ [0, 1] ──┤── Meta-Learner ──→ p_final
+Track C (Transformer) → p_C ∈ [0,1] ─┘  (Logistic Regression)
+                                         + 5 meta-features:
+                                           - day_of_cycle
+                                           - recent_flare_count
+                                           - current_goes_class
+                                           - sxr_trend_1h
+                                           - hxr_trend_1h
+```
+
+**Meta-learner:** Logistic regression with L2 regularization (C=1.0), trained on
+validation set predictions (out-of-fold to prevent leakage).
+
+#### 12.5.2 Deep Ensemble Uncertainty (Novel N7)
+
+Train **5 Transformer models** with different random seeds:
+- Mean prediction: $\bar{p} = \frac{1}{5}\sum_i p_i$
+- Epistemic uncertainty: $\sigma_{ep} = \sqrt{\frac{1}{5}\sum_i (p_i - \bar{p})^2}$
+- Aleatoric uncertainty: $\sigma_{al} = \frac{1}{5}\sum_i \sqrt{p_i(1-p_i)}$
+- Total: $\sigma = \sqrt{\sigma_{ep}^2 + \sigma_{al}^2}$
+
+**Alert threshold:** $p_{final} > 0.5$ AND $\sigma_{ep} < 0.15$ (confident prediction)
+
+#### 12.5.3 MC Dropout
+
+At inference, enable dropout in Transformer and run 100 forward passes:
+$$p(y|x) = \frac{1}{100}\sum_{i=1}^{100} p(y|x, W_i)$$
+
+### 12.6 Evaluation Framework
+
+#### 12.6.1 Rolling-Origin Cross-Validation
+
+```
+Fold 1: Train [day 1–360]    Val [day 361–430]    Test [day 431–500]
+Fold 2: Train [day 1–430]    Val [day 431–500]    Test [day 501–570]
+Fold 3: Train [day 1–500]    Val [day 501–570]    Test [day 571–640]
+Fold 4: Train [day 1–570]    Val [day 571–640]    Test [day 641–710]
+Fold 5: Train [day 1–640]    Val [day 641–710]    Test [day 711–724]
+```
+
+Report mean ± std TSS across folds. This gives a robust estimate and
+prevents overfitting to a single split.
+
+#### 12.6.2 Multi-Horizon Evaluation
+
+| Horizon | Description | Operational Use |
+|---------|-------------|-----------------|
+| 5 min | Now-near-term | Real-time alert |
+| 15 min | Short-term forecast | Grid operator warning |
+| 30 min | Medium-term forecast | Satellite operator action |
+| 60 min | Long-term forecast | Mission planning |
+
+Train separate output heads for each horizon (multi-task learning).
+
+#### 12.6.3 Class-Specific Evaluation
+
+Report TSS separately for:
+- ≥X-class flares (148 events)
+- ≥M-class flares (1,570 events)
+- ≥C-class flares (2,323 events)
+- All flares (2,324 events)
+
+---
+
+## 13. GPU-Optimized Implementation
+
+### 13.1 Hardware Budget
+
+| Component | Spec | Available |
+|-----------|------|-----------|
+| GPU | A100 80GB PCIe | 80 GB (free after stopping vLLM) |
+| CPU | 24 cores | All cores for feature extraction |
+| RAM | 131 GB | Sufficient for in-memory sequences |
+| Disk | 332 GB free | Sufficient for sequence arrays (~35 GB) |
+
+### 13.2 GPU Memory Allocation
+
+| Component | Memory | Notes |
+|-----------|--------|-------|
+| CNN-LSTM (batch=256) | ~8 GB | 2M params + activations |
+| Transformer (batch=512) | ~16 GB | 8M params + attention activations |
+| MAE pretrain (batch=512) | ~24 GB | 85M params (encoder+decoder) |
+| Deep Ensemble (5 models) | ~40 GB | 5×8GB, train sequentially |
+| Data prefetch buffer | ~4 GB | Pinned memory |
+| **Peak (single model)** | **~20 GB** | Transformer training |
+| **Peak (ensemble)** | **~44 GB** | Fits in 80 GB |
+
+### 13.3 Data Pipeline Optimization
+
+```
+Stage 1: Sequence Preparation (one-time, ~2h)
+  ├── For each of 724 days:
+  │   ├── Load SoLEXS LC (86400,) → deadtime correct
+  │   ├── Load 4 HEL1OS LCs → background subtract → align to SoLEXS
+  │   ├── Load GOES → interpolate to 1s
+  │   ├── Stack into (12, 86400) channel tensor
+  │   └── Extract sliding windows: (12, 3600) every 300s
+  ├── Save to X_seq.npy (memory-mapped, float32)
+  └── Total: ~200k windows × 12 × 3600 × 4 bytes ≈ 31 GB
+
+Stage 2: Feature Extraction (parallel, ~4h, same as v2 but improved)
+  ├── 24 workers, each processes ~30 days
+  ├── New: per-window causal network, derivatives, multi-scale, wavelet
+  └── Output: X_flat.npy (200k × 179), y.npy (200k,)
+
+Stage 3: MAE Pretraining (GPU, ~24h overnight)
+  ├── All 724 days of 10s-cadence data
+  ├── 50 epochs, batch=512
+  └── Save encoder weights
+
+Stage 4: Model Training (GPU, ~8h)
+  ├── Track A: Optuna + CatBoost (100 trials × 40s = 1h GPU)
+  ├── Track B: CNN-LSTM (50 epochs × 5 min = 4h GPU)
+  ├── Track C: Transformer fine-tune from MAE (30 epochs × 8 min = 4h GPU)
+  └── Ensemble: 5 Transformers (5 × 4h = 20h, or sequential overnight)
+
+Stage 5: Evaluation (~30 min)
+  ├── Rolling-origin CV
+  ├── Multi-horizon evaluation
+  ├── Uncertainty calibration
+  └── Save results
+```
+
+### 13.4 Mixed Precision Training
+
+```python
+from torch.cuda.amp import autocast, GradScaler
+
+scaler = GradScaler()
+for batch in dataloader:
+    with autocast(dtype=torch.bfloat16):
+        loss = model(batch)
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+    scaler.step(optimizer)
+    scaler.update()
+```
+
+**Speedup:** 2.5× on A100 Tensor Cores (bfloat16 vs FP32).
+
+### 13.5 FlashAttention
+
+```python
+# PyTorch 2.x built-in — no external library needed
+attn_output = F.scaled_dot_product_attention(
+    query, key, value,
+    attn_mask=None,
+    dropout_p=0.1 if training else 0.0,
+    is_causal=False,
+)
+```
+
+**Speedup:** 2–4× for attention computation, O(T²) → O(T) memory.
+
+### 13.6 Data Loading
+
+```python
+class FlareSequenceDataset(Dataset):
+    def __init__(self, X_path, y_path, indices=None):
+        self.X = np.load(X_path, mmap_mode='r')  # memory-mapped
+        self.y = np.load(y_path, mmap_mode='r')
+
+    def __getitem__(self, idx):
+        x = torch.from_numpy(self.X[idx]).float()
+        y = self.y[idx]
+        # Augmentation
+        if self.training:
+            x = self.augment(x)
+        return x, y
+
+# DataLoader with prefetch
+loader = DataLoader(
+    dataset, batch_size=512, shuffle=True,
+    num_workers=8, pin_memory=True,
+    prefetch_factor=4, persistent_workers=True,
+)
+```
+
+---
+
+## 14. Implementation Roadmap
+
+### Phase 1: Bug Fixes + Feature Engineering (Day 1, ~4h)
+
+| Task | File | Est. Time |
+|------|------|-----------|
+| Fix Granger causality typo | `causal_network.py:99` | 5 min |
+| Add per-window causal features | `engineering.py` | 30 min |
+| Compute neupert_granger + mediation | `run_full_pipeline.py` | 20 min |
+| Add temporal derivative features | `engineering.py` | 30 min |
+| Add multi-scale temporal features | `engineering.py` | 30 min |
+| Add GOES time series features | `engineering.py` | 30 min |
+| Add per-window spectral features | `engineering.py` | 30 min |
+| Add wavelet scalogram features | `engineering.py` | 45 min |
+| Fix transfer entropy resolution | `engineering.py` | 10 min |
+| Fix sample entropy window | `engineering.py` | 10 min |
+| Multi-band QPP | `engineering.py` | 20 min |
+| Update canonical feature list | `engineering.py` | 10 min |
+| Tests for new features | `tests/` | 30 min |
+| **Run improved feature extraction** | pipeline | **~4h (724 days)** |
+
+### Phase 2: GBDT Optimization (Day 2, ~2h)
+
+| Task | Est. Time |
+|------|-----------|
+| SHAP feature importance analysis | 15 min |
+| Feature selection (keep top 60–80) | 10 min |
+| Optuna hyperparameter search (100 trials) | 1h (GPU) |
+| Train final CatBoost with best params | 5 min |
+| Rolling-origin CV evaluation | 30 min |
+| **Expected TSS: 0.50–0.55** | |
+
+### Phase 3: Sequence Data Preparation (Day 2, ~2h)
+
+| Task | Est. Time |
+|------|-----------|
+| Build sequence extraction script | 30 min |
+| Extract 12-channel × 3600s windows for 724 days | 1h (24 workers) |
+| Save X_seq.npy (memory-mapped) | 10 min |
+| Build PyTorch Dataset + DataLoader | 20 min |
+| Tests for sequence data | 10 min |
+
+### Phase 4: CNN-LSTM Training (Day 2–3, ~4h GPU)
+
+| Task | Est. Time |
+|------|-----------|
+| Fix CNN-LSTM architecture (v2 → v3) | 30 min |
+| Implement data augmentation | 20 min |
+| Train on A100 (50 epochs, bfloat16) | 3h |
+| Evaluate with rolling-origin CV | 10 min |
+| **Expected TSS: 0.55–0.62** | |
+
+### Phase 5: Self-Supervised MAE (Day 3, ~24h GPU overnight)
+
+| Task | Est. Time |
+|------|-----------|
+| Implement MAE architecture | 1h |
+| Prepare pretraining data (10s cadence) | 30 min |
+| Pretrain (50 epochs, batch=512) | 24h (overnight) |
+| Save encoder weights | 5 min |
+
+### Phase 6: Spectral-Temporal Transformer (Day 4, ~5h GPU)
+
+| Task | Est. Time |
+|------|-----------|
+| Implement transformer architecture | 1h |
+| Implement Neupert physics loss | 30 min |
+| Implement cross-attention (spectral ↔ temporal) | 30 min |
+| Load MAE pretrained weights | 10 min |
+| Fine-tune (30 epochs from MAE) | 3h |
+| Evaluate | 10 min |
+| **Expected TSS: 0.62–0.70** | |
+
+### Phase 7: Ensemble + Uncertainty (Day 4–5, ~4h GPU)
+
+| Task | Est. Time |
+|------|-----------|
+| Train 4 more transformers (seeds 43–46) | 4×3h = 12h (or overnight) |
+| Implement stacking meta-learner | 30 min |
+| MC dropout inference | 20 min |
+| Conformal prediction calibration | 30 min |
+| Final evaluation (all metrics) | 30 min |
+| **Expected TSS: 0.68–0.75** | |
+
+### Phase 8: Documentation & Visualization (Day 5, ~2h)
+
+| Task | Est. Time |
+|------|-----------|
+| Update README.md with v3 results | 20 min |
+| Update RESULTS.md with full metrics | 30 min |
+| Generate evaluation plots (ROC, PR, TSS vs horizon) | 30 min |
+| Update dashboard with uncertainty display | 30 min |
+| Commit and push | 10 min |
+
+---
+
+## 15. Expected TSS Trajectory
+
+| Version | Key Change | TSS | AUC-ROC |
+|---------|-----------|-----|---------|
+| v0 | Baseline (42 features, noise labels) | 0.149 | 0.659 |
+| v1 | GOES calibration + chronological split + 70 features | 0.347 | 0.742 |
+| v2 | 117 features (causal, QPP, non-thermal, HK, GOES-A) | 0.412 | 0.795 |
+| **v3a** | **Bug fixes + 179 features + Optuna** | **0.50–0.55** | **0.83–0.85** |
+| **v3b** | **+ CNN-LSTM sequence model** | **0.55–0.62** | **0.85–0.88** |
+| **v3c** | **+ Transformer with Neupert loss** | **0.62–0.70** | **0.88–0.92** |
+| **v3d** | **+ Ensemble + MAE pretrain + uncertainty** | **0.68–0.75** | **0.90–0.94** |
+
+### Why we expect these improvements:
+
+1. **Bug fixes (v2→v3a):** The Granger causality bug means 2 features are always 0.
+   Fixing this + computing per-window causal features adds genuine predictive signal.
+   The transfer entropy at 10s resolution captures Neupert delays (1–60s) that 60s
+   bins completely miss.
+
+2. **New features (v2→v3a):** Temporal derivatives (dSXR/dt) are the *direct*
+   observable of the Neupert effect. Multi-scale features capture precursors at
+   different timescales. Wavelet scalogram captures QPP and oscillatory precursors.
+
+3. **Sequence model (v3a→v3b):** The CNN-LSTM sees the raw 3600s time series.
+   It can learn "SXR gradually rising for 15 min, then HXR spike" — a pattern
+   that flat features reduce to `sxr_mean`, `sxr_max`, `hxr_max` (losing the
+   temporal ordering).
+
+4. **Transformer (v3b→v3c):** Self-attention captures long-range dependencies
+   (e.g., flare 30 min ago affects current prediction). Cross-attention
+   discovers which energy bands are most predictive. Physics loss constrains
+   the model to physically consistent solutions.
+
+5. **MAE pretrain (v3c→v3d):** Self-supervised learning on 724 days of unlabeled
+   data teaches the model the "language" of solar X-ray variability. This is
+   especially powerful with limited labeled flare events (6% positive rate).
+
+6. **Ensemble (v3c→v3d):** GBDT captures feature interactions; CNN-LSTM captures
+   local temporal patterns; Transformer captures global dependencies + physics.
+   Stacking combines their complementary strengths.
+
+---
+
+## 16. Risk Assessment
+
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| GPU OOM during transformer training | Medium | High | Use gradient checkpointing, reduce batch size |
+| MAE pretraining doesn't help | Medium | Medium | Fine-tune from scratch as fallback |
+| Optuna overfits validation | Low | Medium | Use rolling-origin CV, not single split |
+| Data augmentation hurts minority class | Low | Medium | Start with small augmentation, ablation study |
+| Neupert loss destabilizes training | Medium | High | Start with λ_phys=0.01, warm up to 0.1 |
+| Disk space for sequence arrays (~35 GB) | Low | Low | Use float16, delete after training |
+| Feature extraction too slow (v3 has more features) | Medium | Medium | Parallelize, GPU-accelerate wavelet/causal |
+
+---
+
+## 17. Novel Contributions Status
+
+| # | Novel Contribution | v2 Status | v3 Plan |
+|---|-------------------|-----------|---------|
+| N1 | Combined soft+hard nowcast from Aditya-L1 | ✅ Done (2,324 events) | Improve with multi-band QPP |
+| N2 | Neupert physics-informed loss | ❌ Not implemented | ✅ Implement in §12.4.2 |
+| N3 | Spectral-temporal cross-attention transformer | ❌ Not implemented | ✅ Implement in §12.4.1 |
+| N4 | Transfer entropy precursor index | ⚠️ Partial (60s bins, buggy) | ✅ Fix + 10s resolution + per-window |
+| N5 | Energy-dependent forecasting | ✅ Done (117 features) | ✅ Expand to 179 features |
+| N6 | Self-supervised MAE pretraining | ❌ Not implemented | ✅ Implement in §12.4.3 |
+| N7 | Bayesian UQ for operational forecasting | ❌ Not implemented | ✅ Implement in §12.5.2 |
+| N8 | Cross-instrument transfer GOES→Aditya-L1 | ❌ Not implemented | Future work (v4) |
+
+---
+
+*V3 plan prepared: June 30, 2026 | Target TSS: ≥0.70 | GPU: A100 80GB*
