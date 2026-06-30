@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 
+# Pipeline output artifacts
+pipeline/dist/
+
 # Virtual environment
 .venv/
 

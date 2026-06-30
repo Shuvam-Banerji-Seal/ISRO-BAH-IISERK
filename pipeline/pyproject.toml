@@ -1,0 +1,16 @@
+[project]
+name = "isro-pipeline"
+version = "0.1.0"
+description = "SoLEXS + HEL1OS feature engineering pipeline for solar flare nowcasting and forecasting"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "matplotlib>=3.9",
+    "astropy>=6.0",
+    "PyWavelets>=1.7",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
