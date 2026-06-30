@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chunked GPU extraction — load 50 days, process on GPU, repeat. GPU stays busy."""
+"""GPU extraction — loads ALL data to GPU for sustained computation."""
 
 import sys, os, time, warnings, json
 
@@ -16,20 +16,26 @@ from bah2026.data import discover_combined_days
 from bah2026.config import CATALOGS_DIR, HDF5_DIR
 
 HDF5_DIR.mkdir(parents=True, exist_ok=True)
-CHUNK = 50
+LOOKBACK, STEP = 3600, 300
 
 
-def _load_chunk(days_chunk):
-    from bah2026.data.reader import load_solexs_lc, load_hel1os_lc, load_solexs_pi
+def _load_all_data(days, event_times):
+    """Load ALL days to CPU arrays, accumulating windowed data."""
+    from bah2026.data.reader import load_solexs_lc, load_solexs_pi, load_hel1os_lc
     from bah2026.data.preprocessing import align_hel1os_to_solexs
     from bah2026.data.corrections import (
         correct_solexs_deadtime,
         subtract_hel1os_background,
     )
-    from bah2026.features.spectral_fitting import fit_temperature
 
-    sxr_list, hxr_list, pre_list, et_list, ts_list = [], [], [], [], []
-    for d in days_chunk:
+    all_sxr_windows = []
+    all_hxr_windows = []
+    all_pi_windows = []
+    all_ys = []
+    all_precomputed = []
+
+    t0 = time.time()
+    for i, d in enumerate(days):
         try:
             sxr = load_solexs_lc(d)
             counts = correct_solexs_deadtime(
@@ -40,70 +46,74 @@ def _load_chunk(days_chunk):
                 )
             )
             time_s = sxr["time"]
-            aligned = None
-            try:
-                hx = load_hel1os_lc(d, detector="czt", num=1)
-                if hx["ctr"].size > 0:
-                    ctr = subtract_hel1os_background(hx["ctr"], "czt")
-                    aligned = align_hel1os_to_solexs(
-                        hx["mjd"], ctr, time_s, sxr["mjdrefi"], sxr["mjdreff"]
-                    )
-            except Exception:
-                pass
-            temp_mk = 0.0
+
+            hxr4 = np.zeros((len(counts), 20), dtype=np.float32)
+            for idx, (det, num) in enumerate(
+                [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]
+            ):
+                try:
+                    hx = load_hel1os_lc(d, detector=det, num=num)
+                    if hx["ctr"].size > 0:
+                        ctr = subtract_hel1os_background(hx["ctr"], det)
+                        aligned = align_hel1os_to_solexs(
+                            hx["mjd"], ctr, time_s, sxr["mjdrefi"], sxr["mjdreff"]
+                        )
+                        ml = min(len(counts), aligned.shape[0])
+                        hxr4[:ml, idx * 5 : (idx + 1) * 5] = aligned[:ml, :5].astype(
+                            np.float32
+                        )
+                except Exception:
+                    pass
+
+            pi_win = None
             try:
                 pi = load_solexs_pi(d)
                 if pi["counts"].size > 0:
-                    summed = np.nansum(pi["counts"][:300, :], axis=0)
-                    if np.sum(summed) > 100:
-                        T, EM, chi2 = fit_temperature(summed)
-                        if T > 0:
-                            temp_mk = float(T)
+                    pi_raw = pi["counts"].astype(np.float32)
+                    n_w = (len(pi_raw) - LOOKBACK) // STEP + 1
+                    if n_w > 0:
+                        pi_win = np.zeros((n_w, 340), dtype=np.float32)
+                        for wi in range(n_w):
+                            s = wi * STEP
+                            pi_win[wi] = np.nansum(pi_raw[s : s + LOOKBACK], axis=0)
             except Exception:
                 pass
 
-            pre = {
-                "sxr_temperature_mk": temp_mk,
-                "neupert_granger_improvement": 0.0,
-                "neupert_best_lag": 0.0,
-                "max_mediation_proportion": 0.0,
-                "deadtime_max_pct": 0.0,
-                "bg_fraction_pct": 0.0,
-                "hk_czt1temp": 0.0,
-                "hk_czt2temp": 0.0,
-                "hk_cdte1temp": 0.0,
-                "hk_cdte2temp": 0.0,
-                "hk_czthvmon": 0.0,
-                "hk_cdtehvmon": 0.0,
-                "hk_czt1satctr": 0.0,
-                "hk_cdte1pilectr": 0.0,
-                "hxr_spectral_index_gamma": 0.0,
-                "hxr_gamma_czt2": 0.0,
-                "hxr_gamma_cdte1": 0.0,
-                "hxr_gamma_cdte2": 0.0,
-                "nonthermal_gamma": 0.0,
-                "nonthermal_ec": 0.0,
-                "nonthermal_n_nth": 0.0,
-                "thermal_fraction": 0.0,
-                "goes_xrsb_flux": 0.0,
-                "goes_xrsa_flux": 0.0,
-                "goes_xrsa_xrsb_ratio": 0.0,
-                "sxr_emission_measure": 0.0,
-                "sxr_chi2_red": 0.0,
-                "czt2_total_mean": 0.0,
-                "czt2_total_max": 0.0,
-                "czt2_total_std": 0.0,
-                "cdte2_total_mean": 0.0,
-                "cdte2_total_max": 0.0,
-                "cdte2_total_std": 0.0,
-            }
-            sxr_list.append(counts)
-            hxr_list.append(aligned)
-            pre_list.append(pre)
-            ts_list.append(time_s)
+            n_w = (len(counts) - LOOKBACK) // STEP + 1
+            if n_w < 1:
+                continue
+
+            for wi in range(n_w):
+                start = wi * STEP
+                sxr_win = counts[start : start + LOOKBACK].astype(np.float32)
+                hxr_win = hxr4[start : start + LOOKBACK]
+                all_sxr_windows.append(sxr_win)
+                all_hxr_windows.append(hxr_win)
+                if pi_win is not None and wi < len(pi_win):
+                    all_pi_windows.append(pi_win[wi])
+                else:
+                    all_pi_windows.append(np.zeros(340, dtype=np.float32))
+
+                et = event_times.get(str(d), [])
+                t = time_s[min(start + LOOKBACK, len(time_s) - 1)]
+                y = 1 if any(0 < e - t <= 1800 for e in et) else 0
+                all_ys.append(y)
+
         except Exception:
             pass
-    return sxr_list, hxr_list, pre_list, ts_list
+
+        if (i + 1) % 50 == 0:
+            elapsed = time.time() - t0
+            print(
+                f"  Loaded {i + 1}/{len(days)} days, {len(all_sxr_windows)} windows, {elapsed:.0f}s",
+                flush=True,
+            )
+
+    print(
+        f"  Total: {len(all_sxr_windows)} windows from {len(days)} days in {time.time() - t0:.0f}s",
+        flush=True,
+    )
+    return all_sxr_windows, all_hxr_windows, all_pi_windows, all_ys
 
 
 def main():
@@ -116,55 +126,99 @@ def main():
 
     days = discover_combined_days()
     gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-    print(f"GPU: {gpu_name} | {len(days)} days | chunk={CHUNK}", flush=True)
+    print(f"GPU: {gpu_name} | {len(days)} days", flush=True)
 
-    from bah2026.features.gpu_features import gpu_extract_features_batch
+    print("Phase 1: Loading ALL data to CPU...", flush=True)
+    sxr_wins, hxr_wins, pi_wins, ys = _load_all_data(days, event_times)
 
-    all_X, all_y = [], []
+    n_windows = len(sxr_wins)
+    print(f"  {n_windows} windows total", flush=True)
+
+    print("Phase 2: Transferring ALL to GPU...", flush=True)
     t0 = time.time()
 
-    for ci in range(0, len(days), CHUNK):
-        chunk_days = days[ci : ci + CHUNK]
-        t_load = time.time()
-        sxr_l, hxr_l, pre_l, ts_l = _load_chunk(chunk_days)
-        et_l = [event_times.get(str(d), []) for d in chunk_days[: len(sxr_l)]]
+    sxr_tensor = torch.from_numpy(np.array(sxr_wins, dtype=np.float32)).to("cuda")
+    hxr_tensor = torch.from_numpy(np.array(hxr_wins, dtype=np.float32)).to("cuda")
+    pi_tensor = torch.from_numpy(np.array(pi_wins, dtype=np.float32)).to("cuda")
 
-        X_chunk, y_chunk = gpu_extract_features_batch(
-            sxr_l, hxr_l, pre_l, et_l, ts_l, batch_size=CHUNK
-        )
-        t_gpu = time.time() - t_load
+    torch.cuda.synchronize()
+    print(f"  Transfer: {time.time() - t0:.1f}s", flush=True)
+    print(
+        f"  SXR: {sxr_tensor.shape} = {sxr_tensor.element_size() * sxr_tensor.nelement() / 1024**3:.2f}GB on {sxr_tensor.device}",
+        flush=True,
+    )
+    print(
+        f"  HXR: {hxr_tensor.shape} = {hxr_tensor.element_size() * hxr_tensor.nelement() / 1024**3:.2f}GB on {hxr_tensor.device}",
+        flush=True,
+    )
+    print(
+        f"  PI:  {pi_tensor.shape} = {pi_tensor.element_size() * pi_tensor.nelement() / 1024**3:.2f}GB on {pi_tensor.device}",
+        flush=True,
+    )
+    print(
+        f"  VRAM: {torch.cuda.memory_allocated() / 1024**3:.2f}GB allocated, {torch.cuda.memory_reserved() / 1024**3:.2f}GB reserved",
+        flush=True,
+    )
 
-        if X_chunk is not None and len(X_chunk) > 0:
-            all_X.append(X_chunk)
-            all_y.append(y_chunk)
+    print("Phase 3: Computing ALL features on GPU...", flush=True)
+    t0 = time.time()
 
-        done = min(ci + CHUNK, len(days))
-        total_elapsed = time.time() - t0
-        total_rows = sum(x.shape[0] for x in all_X)
-        print(
-            f"  [{done}/{len(days)}] load+gpu={t_gpu:.1f}s rows={total_rows} "
-            f"gpu_mem={torch.cuda.memory_allocated() / 1024**3:.1f}GB total={total_elapsed:.0f}s",
-            flush=True,
-        )
-        del sxr_l, hxr_l, pre_l
-        torch.cuda.empty_cache()
+    from bah2026.features.gpu_features import (
+        _batch_stats,
+        _batch_acf,
+        _batch_spectral_entropy,
+        _batch_derivative_features,
+        _batch_multiscale,
+        _batch_neupert,
+        _batch_hxr_features,
+        _batch_pi_channel_features,
+        FEATURE_AUTOCORR_LAGS,
+        get_canonical_feature_names,
+    )
 
-    if all_X:
-        X = np.vstack(all_X)
-        y = np.concatenate(all_y)
-        total_time = time.time() - t0
-        print(
-            f"\nDone: X={X.shape}, y={y.shape}, pos={y.sum()} ({100 * y.mean():.2f}%) in {total_time:.0f}s",
-            flush=True,
-        )
-        np.save(HDF5_DIR / "X_features.npy", X)
-        np.save(HDF5_DIR / "y_labels.npy", y)
-        from bah2026.features.engineering import get_canonical_feature_names
+    feats = {}
+    feats.update(_batch_stats(sxr_tensor))
+    feats.update(_batch_acf(sxr_tensor, FEATURE_AUTOCORR_LAGS))
+    feats.update(_batch_spectral_entropy(sxr_tensor))
+    feats.update(_batch_derivative_features(sxr_tensor, hxr_tensor))
+    feats.update(_batch_multiscale(sxr_tensor, hxr_tensor))
+    feats.update(_batch_neupert(sxr_tensor, hxr_tensor))
+    feats.update(_batch_hxr_features(hxr_tensor))
+    feats.update(_batch_pi_channel_features(pi_tensor))
 
-        (HDF5_DIR / "feature_names.json").write_text(
-            json.dumps(get_canonical_feature_names())
-        )
-        print(f"Saved to {HDF5_DIR}", flush=True)
+    torch.cuda.synchronize()
+    compute_time = time.time() - t0
+    print(f"  GPU compute: {compute_time:.1f}s", flush=True)
+    print(
+        f"  VRAM after compute: {torch.cuda.memory_allocated() / 1024**3:.2f}GB",
+        flush=True,
+    )
+
+    print("Phase 4: Assembling feature matrix...", flush=True)
+    canonical = get_canonical_feature_names()
+    n_feat = len(canonical)
+    row = torch.zeros(n_windows, n_feat, device="cuda", dtype=torch.float32)
+    feat_keys = list(feats.keys())
+    for fi, fn in enumerate(canonical):
+        if fn in feat_keys:
+            val = feats[fn]
+            if isinstance(val, torch.Tensor) and val.shape[0] == n_windows:
+                row[:, fi] = val
+
+    torch.cuda.synchronize()
+    X = row.cpu().numpy().astype(np.float32)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    y = np.array(ys, dtype=int)
+
+    total_time = time.time() - t0
+    print(
+        f"X={X.shape}, y={y.shape}, pos={y.sum()} ({100 * y.mean():.2f}%) in {total_time:.0f}s",
+        flush=True,
+    )
+    np.save(HDF5_DIR / "X_features.npy", X)
+    np.save(HDF5_DIR / "y_labels.npy", y)
+    (HDF5_DIR / "feature_names.json").write_text(json.dumps(canonical))
+    print(f"Saved to {HDF5_DIR}", flush=True)
 
 
 if __name__ == "__main__":

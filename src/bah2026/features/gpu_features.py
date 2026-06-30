@@ -440,23 +440,25 @@ def gpu_extract_features_batch(
     all_precomputed: list[dict],
     all_event_times: list[list[float]],
     all_time_s: list[np.ndarray],
+    all_pi: list[np.ndarray | None] | None = None,
     batch_size: int = 100,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Process multiple days on GPU in one batch. Returns (X_concat, y_concat)."""
     all_X, all_y = [], []
     for start in range(0, len(all_sxr), batch_size):
         end = min(start + batch_size, len(all_sxr))
+        pi_chunk = all_pi[start:end] if all_pi is not None else None
         X_batch, y_batch = _gpu_batch_chunk(
             all_sxr[start:end],
             all_hxr[start:end],
             all_precomputed[start:end],
             all_event_times[start:end],
             all_time_s[start:end],
+            pi_chunk,
         )
         if X_batch is not None:
             all_X.append(X_batch)
             all_y.append(y_batch)
-        torch.cuda.empty_cache()
     if not all_X:
         return np.empty((0, 0), dtype=np.float32), np.empty(0, dtype=int)
     return np.vstack(all_X), np.concatenate(all_y)
@@ -468,10 +470,9 @@ def _gpu_batch_chunk(
     precomputed_list,
     event_times_list,
     time_s_list,
+    pi_list=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     lookback, step = 3600, 300
-    window_feats = []
-    window_ys = []
 
     sxr_batch = torch.from_numpy(
         np.array(
@@ -500,72 +501,231 @@ def _gpu_batch_chunk(
             padded.append(p)
         hxr_batch = torch.from_numpy(np.array(padded, dtype=np.float32)).to(_DEVICE)
 
+    pi_batch = None
+    if pi_list is not None and any(p is not None for p in pi_list):
+        max_w = max(p.shape[0] for p in pi_list if p is not None)
+        max_ch = max(p.shape[1] for p in pi_list if p is not None)
+        padded_pi = []
+        for p in pi_list:
+            if p is not None:
+                pp = np.pad(
+                    p,
+                    ((0, max(0, max_w - p.shape[0])), (0, max(0, max_ch - p.shape[1]))),
+                    mode="constant",
+                )[:max_w, :max_ch]
+            else:
+                pp = np.zeros((max_w, max_ch), dtype=np.float32)
+            padded_pi.append(pp)
+        pi_batch = torch.from_numpy(np.array(padded_pi, dtype=np.float32)).to(_DEVICE)
+
+    all_sxr_windows = []
+    all_hxr_windows = []
+    all_pi_windows = []
+    all_window_counts = []
+    all_ys = []
+
     for i in range(len(sxr_list)):
-        sxr_win = sxr_batch[i]
-        hxr_win = hxr_batch[i] if hxr_batch is not None else None
         n_w = (len(sxr_list[i]) - lookback) // step + 1
         if n_w < 1:
             continue
 
-        sxr_u = sxr_win.unsqueeze(0).expand(n_w, -1).unfold(1, lookback, step)[:, 0, :]
-        hxr_u = None
-        if hxr_win is not None and hxr_win.shape[1] >= 5:
+        sxr_u = (
+            sxr_batch[i].unsqueeze(0).expand(n_w, -1).unfold(1, lookback, step)[:, 0, :]
+        )
+        all_sxr_windows.append(sxr_u)
+
+        if hxr_batch is not None:
             hxr_u = (
-                hxr_win.unsqueeze(0)
+                hxr_batch[i]
+                .unsqueeze(0)
                 .expand(n_w, -1, -1)
                 .unfold(1, lookback, step)[:, 0, :, :]
                 .permute(0, 2, 1)
             )
-
-        feats = {}
-        feats.update(_batch_stats(sxr_u))
-        feats.update(_batch_acf(sxr_u, FEATURE_AUTOCORR_LAGS))
-        feats.update(_batch_spectral_entropy(sxr_u))
-        feats.update(_batch_derivative_features(sxr_u, hxr_u))
-        feats.update(_batch_multiscale(sxr_u, hxr_u))
-        feats.update(_batch_neupert(sxr_u, hxr_u))
-        if hxr_u is not None:
-            feats.update(_batch_hxr_features(hxr_u))
+            all_hxr_windows.append(hxr_u)
         else:
-            for k in list(
-                _batch_hxr_features(torch.zeros(1, lookback, 10, device=_DEVICE)).keys()
-            ):
-                feats[k] = torch.zeros(n_w, device=_DEVICE)
+            all_hxr_windows.append(None)
 
-        pre = precomputed_list[i]
-        for k, v in pre.items():
-            if isinstance(v, (int, float)):
-                feats[k] = torch.full(
-                    (n_w,), float(np.clip(v, -1e10, 1e10)), device=_DEVICE, dtype=_DTYPE
-                )
+        if pi_batch is not None:
+            pi_u = pi_batch[i].unsqueeze(0).expand(n_w, -1, -1)[:, :n_w, :]
+            all_pi_windows.append(pi_u)
+        else:
+            all_pi_windows.append(None)
 
-        canonical = get_canonical_feature_names()
-        n_feat = len(canonical)
-        row = torch.zeros(n_w, n_feat, device=_DEVICE, dtype=_DTYPE)
-        feat_keys = list(feats.keys())
-        for fi, fn in enumerate(canonical):
-            if fn in feat_keys:
-                val = feats[fn]
-                if isinstance(val, torch.Tensor) and val.shape[0] == n_w:
-                    row[:, fi] = val
+        all_window_counts.append(n_w)
 
-        X_day = row.cpu().numpy().astype(np.float32)
-        X_day = np.nan_to_num(X_day, nan=0.0, posinf=0.0, neginf=0.0)
-
-        y_day = np.zeros(n_w, dtype=int)
         et = event_times_list[i]
         ts = time_s_list[i]
+        y_day = np.zeros(n_w, dtype=int)
         if ts is not None and et:
             for wi in range(n_w):
                 t = ts[min(wi * step + lookback, len(ts) - 1)]
                 y_day[wi] = 1 if any(0 < e - t <= 1800 for e in et) else 0
+        all_ys.append(y_day)
 
-        window_feats.append(X_day)
-        window_ys.append(y_day)
-
-    if not window_feats:
+    if not all_sxr_windows:
         return None, None
-    return np.vstack(window_feats), np.concatenate(window_ys)
+
+    total_w = sum(all_window_counts)
+    sxr_all = torch.cat(all_sxr_windows, dim=0)
+    hxr_all = (
+        torch.cat([w for w in all_hxr_windows if w is not None], dim=0)
+        if any(w is not None for w in all_hxr_windows)
+        else None
+    )
+
+    feats = {}
+    feats.update(_batch_stats(sxr_all))
+    feats.update(_batch_acf(sxr_all, FEATURE_AUTOCORR_LAGS))
+    feats.update(_batch_spectral_entropy(sxr_all))
+    feats.update(_batch_derivative_features(sxr_all, hxr_all))
+    feats.update(_batch_multiscale(sxr_all, hxr_all))
+    feats.update(_batch_neupert(sxr_all, hxr_all))
+
+    if hxr_all is not None:
+        feats.update(_batch_hxr_features(hxr_all))
+        feats.update(_batch_pi_spectral_features(hxr_all))
+    else:
+        for k in list(
+            _batch_hxr_features(torch.zeros(1, lookback, 10, device=_DEVICE)).keys()
+        ):
+            feats[k] = torch.zeros(total_w, device=_DEVICE)
+
+    if pi_batch is not None:
+        pi_all = torch.cat([w for w in all_pi_windows if w is not None], dim=0)
+        feats.update(_batch_pi_channel_features(pi_all))
+
+    canonical = get_canonical_feature_names()
+    n_feat = len(canonical)
+    row = torch.zeros(total_w, n_feat, device=_DEVICE, dtype=_DTYPE)
+    feat_keys = list(feats.keys())
+    for fi, fn in enumerate(canonical):
+        if fn in feat_keys:
+            val = feats[fn]
+            if isinstance(val, torch.Tensor) and val.shape[0] == total_w:
+                row[:, fi] = val
+
+    X_all = row.cpu().numpy().astype(np.float32)
+    X_all = np.nan_to_num(X_all, nan=0.0, posinf=0.0, neginf=0.0)
+    y_all = np.concatenate(all_ys)
+
+    return X_all, y_all
+
+
+def _batch_pi_spectral_features(hxr_windows: torch.Tensor) -> dict[str, torch.Tensor]:
+    B, W, nb = hxr_windows.shape
+    feats = {}
+    if nb >= 20:
+        czt1_bands = hxr_windows[:, :, :5]
+        czt2_bands = hxr_windows[:, :, 5:10]
+        cdte1_bands = hxr_windows[:, :, 10:15]
+        cdte2_bands = hxr_windows[:, :, 15:20]
+
+        for prefix, bands in [
+            ("czt1_", czt1_bands),
+            ("czt2_", czt2_bands),
+            ("cdte1_", cdte1_bands),
+            ("cdte2_", cdte2_bands),
+        ]:
+            full_band = bands[:, :, 4] if bands.shape[2] > 4 else bands[:, :, 0]
+            feats[f"{prefix}total_mean"] = full_band.mean(dim=1)
+            feats[f"{prefix}total_max"] = full_band.max(dim=1).values
+            feats[f"{prefix}total_std"] = full_band.std(dim=1)
+
+        czt_lo = czt1_bands[:, :, 0]
+        czt_hi = czt1_bands[:, :, 1]
+        feats["czt_cross_detector_ratio"] = (czt_lo / czt_hi.clamp(min=1e-6)).mean(
+            dim=1
+        )
+        cdte_lo = cdte1_bands[:, :, 0]
+        cdte_hi = cdte1_bands[:, :, 1]
+        feats["cdte_cross_detector_ratio"] = (cdte_lo / cdte_hi.clamp(min=1e-6)).mean(
+            dim=1
+        )
+    else:
+        for k in [
+            "czt1_total_mean",
+            "czt1_total_max",
+            "czt1_total_std",
+            "czt2_total_mean",
+            "czt2_total_max",
+            "czt2_total_std",
+            "cdte1_total_mean",
+            "cdte1_total_max",
+            "cdte1_total_std",
+            "cdte2_total_mean",
+            "cdte2_total_max",
+            "cdte2_total_std",
+            "czt_cross_detector_ratio",
+            "cdte_cross_detector_ratio",
+        ]:
+            feats[k] = torch.zeros(B, device=_DEVICE)
+    return feats
+
+
+def _batch_pi_channel_features(pi_windows: torch.Tensor) -> dict[str, torch.Tensor]:
+    if pi_windows.dim() == 2:
+        B, C = pi_windows.shape
+        feats = {}
+        energy_bands = [
+            ("pi_2_5kev", 0, 30),
+            ("pi_5_8kev", 30, 80),
+            ("pi_8_12kev", 80, 140),
+            ("pi_12_18kev", 140, 220),
+            ("pi_18_22kev", 220, 340),
+        ]
+        for name, lo, hi in energy_bands:
+            if hi <= C:
+                band = pi_windows[:, lo:hi]
+                feats[f"{name}_mean"] = band.mean(dim=1)
+                feats[f"{name}_std"] = band.std(dim=1).clamp(min=1e-10)
+                feats[f"{name}_max"] = band.max(dim=1).values
+
+        if C >= 340:
+            fe_xxv = pi_windows[:, 100:130]
+            feats["fe_xxv_line_flux"] = fe_xxv.mean(dim=1)
+            continuum = pi_windows[:, 200:300]
+            feats["continuum_level"] = continuum.mean(dim=1)
+            feats["line_to_continuum"] = feats["fe_xxv_line_flux"] / feats[
+                "continuum_level"
+            ].clamp(min=1e-10)
+
+        total_flux = pi_windows.sum(dim=1)
+        feats["pi_total_flux_mean"] = total_flux
+        feats["pi_total_flux_std"] = torch.zeros(B, device=_DEVICE)
+
+        return feats
+    else:
+        B, W, C = pi_windows.shape
+        feats = {}
+        energy_bands = [
+            ("pi_2_5kev", 0, 30),
+            ("pi_5_8kev", 30, 80),
+            ("pi_8_12kev", 80, 140),
+            ("pi_12_18kev", 140, 220),
+            ("pi_18_22kev", 220, 340),
+        ]
+        for name, lo, hi in energy_bands:
+            if hi <= C:
+                band = pi_windows[:, :, lo:hi]
+                feats[f"{name}_mean"] = band.mean(dim=(1, 2))
+                feats[f"{name}_std"] = band.std(dim=(1, 2)).clamp(min=1e-10)
+                feats[f"{name}_max"] = band.max(dim=2).values.mean(dim=1)
+
+        if C >= 340:
+            fe_xxv = pi_windows[:, :, 100:130]
+            feats["fe_xxv_line_flux"] = fe_xxv.mean(dim=(1, 2))
+            continuum = pi_windows[:, :, 200:300]
+            feats["continuum_level"] = continuum.mean(dim=(1, 2))
+            feats["line_to_continuum"] = feats["fe_xxv_line_flux"] / feats[
+                "continuum_level"
+            ].clamp(min=1e-10)
+
+        total_flux = pi_windows.sum(dim=2)
+        feats["pi_total_flux_mean"] = total_flux.mean(dim=1)
+        feats["pi_total_flux_std"] = total_flux.std(dim=1)
+
+        return feats
 
 
 def gpu_extract_features_day(
