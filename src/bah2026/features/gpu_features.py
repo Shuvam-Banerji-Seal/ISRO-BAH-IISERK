@@ -434,6 +434,140 @@ def _batch_info_theory(
     return feats
 
 
+def gpu_extract_features_batch(
+    all_sxr: list[np.ndarray],
+    all_hxr: list[np.ndarray | None],
+    all_precomputed: list[dict],
+    all_event_times: list[list[float]],
+    all_time_s: list[np.ndarray],
+    batch_size: int = 100,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Process multiple days on GPU in one batch. Returns (X_concat, y_concat)."""
+    all_X, all_y = [], []
+    for start in range(0, len(all_sxr), batch_size):
+        end = min(start + batch_size, len(all_sxr))
+        X_batch, y_batch = _gpu_batch_chunk(
+            all_sxr[start:end],
+            all_hxr[start:end],
+            all_precomputed[start:end],
+            all_event_times[start:end],
+            all_time_s[start:end],
+        )
+        if X_batch is not None:
+            all_X.append(X_batch)
+            all_y.append(y_batch)
+        torch.cuda.empty_cache()
+    if not all_X:
+        return np.empty((0, 0), dtype=np.float32), np.empty(0, dtype=int)
+    return np.vstack(all_X), np.concatenate(all_y)
+
+
+def _gpu_batch_chunk(
+    sxr_list,
+    hxr_list,
+    precomputed_list,
+    event_times_list,
+    time_s_list,
+) -> tuple[np.ndarray, np.ndarray]:
+    lookback, step = 3600, 300
+    window_feats = []
+    window_ys = []
+
+    sxr_batch = torch.from_numpy(
+        np.array(
+            [
+                np.pad(s, (0, max(0, lookback + step - len(s))), mode="edge")[
+                    : lookback + step
+                ]
+                for s in sxr_list
+            ],
+            dtype=np.float32,
+        )
+    ).to(_DEVICE)
+
+    hxr_batch = None
+    has_hxr = [h is not None and h.shape[1] >= 5 for h in hxr_list]
+    if any(has_hxr):
+        max_bands = max(h.shape[1] for h in hxr_list if h is not None)
+        padded = []
+        for h in hxr_list:
+            if h is not None:
+                p = np.pad(
+                    h, ((0, max(0, lookback + step - h.shape[0])), (0, 0)), mode="edge"
+                )[: lookback + step, :max_bands]
+            else:
+                p = np.zeros((lookback + step, max_bands), dtype=np.float32)
+            padded.append(p)
+        hxr_batch = torch.from_numpy(np.array(padded, dtype=np.float32)).to(_DEVICE)
+
+    for i in range(len(sxr_list)):
+        sxr_win = sxr_batch[i]
+        hxr_win = hxr_batch[i] if hxr_batch is not None else None
+        n_w = (len(sxr_list[i]) - lookback) // step + 1
+        if n_w < 1:
+            continue
+
+        sxr_u = sxr_win.unsqueeze(0).expand(n_w, -1).unfold(1, lookback, step)[:, 0, :]
+        hxr_u = None
+        if hxr_win is not None and hxr_win.shape[1] >= 5:
+            hxr_u = (
+                hxr_win.unsqueeze(0)
+                .expand(n_w, -1, -1)
+                .unfold(1, lookback, step)[:, 0, :, :]
+                .permute(0, 2, 1)
+            )
+
+        feats = {}
+        feats.update(_batch_stats(sxr_u))
+        feats.update(_batch_acf(sxr_u, FEATURE_AUTOCORR_LAGS))
+        feats.update(_batch_spectral_entropy(sxr_u))
+        feats.update(_batch_derivative_features(sxr_u, hxr_u))
+        feats.update(_batch_multiscale(sxr_u, hxr_u))
+        feats.update(_batch_neupert(sxr_u, hxr_u))
+        if hxr_u is not None:
+            feats.update(_batch_hxr_features(hxr_u))
+        else:
+            for k in list(
+                _batch_hxr_features(torch.zeros(1, lookback, 10, device=_DEVICE)).keys()
+            ):
+                feats[k] = torch.zeros(n_w, device=_DEVICE)
+
+        pre = precomputed_list[i]
+        for k, v in pre.items():
+            if isinstance(v, (int, float)):
+                feats[k] = torch.full(
+                    (n_w,), float(np.clip(v, -1e10, 1e10)), device=_DEVICE, dtype=_DTYPE
+                )
+
+        canonical = get_canonical_feature_names()
+        n_feat = len(canonical)
+        row = torch.zeros(n_w, n_feat, device=_DEVICE, dtype=_DTYPE)
+        feat_keys = list(feats.keys())
+        for fi, fn in enumerate(canonical):
+            if fn in feat_keys:
+                val = feats[fn]
+                if isinstance(val, torch.Tensor) and val.shape[0] == n_w:
+                    row[:, fi] = val
+
+        X_day = row.cpu().numpy().astype(np.float32)
+        X_day = np.nan_to_num(X_day, nan=0.0, posinf=0.0, neginf=0.0)
+
+        y_day = np.zeros(n_w, dtype=int)
+        et = event_times_list[i]
+        ts = time_s_list[i]
+        if ts is not None and et:
+            for wi in range(n_w):
+                t = ts[min(wi * step + lookback, len(ts) - 1)]
+                y_day[wi] = 1 if any(0 < e - t <= 1800 for e in et) else 0
+
+        window_feats.append(X_day)
+        window_ys.append(y_day)
+
+    if not window_feats:
+        return None, None
+    return np.vstack(window_feats), np.concatenate(window_ys)
+
+
 def gpu_extract_features_day(
     counts: np.ndarray,
     hxr_bands: np.ndarray | None = None,
@@ -480,9 +614,10 @@ def gpu_extract_features_day(
 
     for k, v in precomputed.items():
         if isinstance(v, (int, float)):
-            all_feats[k] = torch.full((n_windows,), float(v), device=_DEVICE)
+            fv = float(np.clip(v, -1e10, 1e10))
+            all_feats[k] = torch.full((n_windows,), fv, device=_DEVICE, dtype=_DTYPE)
         elif isinstance(v, torch.Tensor):
-            all_feats[k] = v.expand(n_windows)
+            all_feats[k] = v.expand(n_windows).to(_DTYPE)
 
     canonical = get_canonical_feature_names()
     rows = []
