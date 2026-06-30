@@ -95,6 +95,13 @@ from bah2026.data.ground_truth import (
     validate_nowcasting,
     parse_goes_class,
 )
+from bah2026.data.sequence_builder import (
+    build_day_sequence,
+    build_all_sequences,
+    SequenceDataset,
+    create_dataloaders,
+    prepare_downsampled_sequences,
+)
 
 __all__ = [
     # Readers
@@ -137,4 +144,10 @@ __all__ = [
     "load_swpc_flares",
     "validate_nowcasting",
     "parse_goes_class",
+    # Sequence builder (v3)
+    "build_day_sequence",
+    "build_all_sequences",
+    "SequenceDataset",
+    "create_dataloaders",
+    "prepare_downsampled_sequences",
 ]

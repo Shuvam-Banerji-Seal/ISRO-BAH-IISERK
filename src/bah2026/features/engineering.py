@@ -16,6 +16,8 @@ from bah2026.config import (
     FEATURE_SPECTRAL_ENTROPY_NPERSEG,
 )
 
+from bah2026.features.advanced_features import get_advanced_feature_names
+
 # ── Canonical feature sets ──────────────────────────────────────────────
 
 # SXR statistical features (15)
@@ -342,8 +344,8 @@ def extract_features_window(
                 lagged_cross_correlation,
             )
 
-            # Downsample for speed (60s bins)
-            step_ds = 60
+            # Downsample for speed (10s bins — captures Neupert delays 1-60s)
+            step_ds = 10
             sxr_ds = valid[:ml][::step_ds]
             hxr_ds = hxr_full[:ml][::step_ds]
 
@@ -360,14 +362,14 @@ def extract_features_window(
 
             if len(sxr_ds) > 50:
                 f["sample_entropy_sxr"] = float(
-                    sample_entropy(sxr_ds[:200], m=2, r_factor=0.2)
+                    sample_entropy(sxr_ds[:500], m=2, r_factor=0.2)
                 )
             else:
                 f["sample_entropy_sxr"] = 0.0
 
             if len(hxr_ds) > 50:
                 f["sample_entropy_hxr"] = float(
-                    sample_entropy(hxr_ds[:200], m=2, r_factor=0.2)
+                    sample_entropy(hxr_ds[:500], m=2, r_factor=0.2)
                 )
             else:
                 f["sample_entropy_hxr"] = 0.0
@@ -495,7 +497,7 @@ def extract_features_window(
 
 
 def get_canonical_feature_names() -> list[str]:
-    """Return the full sorted list of canonical feature names (v2)."""
+    """Return the full sorted list of canonical feature names (v3: 179 features)."""
     all_feats = (
         _SXR_FEATURES
         + _HXR_FEATURES
@@ -513,6 +515,7 @@ def get_canonical_feature_names() -> list[str]:
         + _CORRECTION_FEATURES
         + _CAUSAL_FEATURES
         + _META_FEATURES
+        + get_advanced_feature_names()
     )
     for lag in FEATURE_AUTOCORR_LAGS:
         all_feats.append(f"sxr_acf_{lag}s")

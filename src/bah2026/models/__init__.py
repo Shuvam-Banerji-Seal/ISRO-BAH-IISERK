@@ -17,6 +17,27 @@ from bah2026.models.forecasting import (
     FlareForecasterCatBoost,
     FlareForecasterCNNLSTM,
 )
+from bah2026.models.cnn_lstm_v3 import (
+    CNNLSTMv3,
+    FocalLoss,
+    FlareForecasterCNNLSTMv3,
+    evaluate_model as evaluate_cnn_lstm,
+    rolling_origin_cv as rolling_origin_cv_cnn,
+)
+from bah2026.models.transformer import (
+    SpectralTemporalTransformer,
+    NeupertLoss,
+    FlareForecasterTransformer,
+    PositionalEncoding,
+    evaluate_transformer,
+)
+from bah2026.models.mae_pretrain import (
+    MaskedAutoencoder,
+    MAEEncoder,
+    MAEDecoder,
+    MAEPretrainer,
+    prepare_pretraining_data,
+)
 
 __all__ = [
     "detect_flares_threshold",
@@ -32,4 +53,20 @@ __all__ = [
     "FlareForecasterXGBoost",
     "FlareForecasterCatBoost",
     "FlareForecasterCNNLSTM",
+    # v3 models
+    "CNNLSTMv3",
+    "FocalLoss",
+    "FlareForecasterCNNLSTMv3",
+    "evaluate_cnn_lstm",
+    "rolling_origin_cv_cnn",
+    "SpectralTemporalTransformer",
+    "NeupertLoss",
+    "FlareForecasterTransformer",
+    "PositionalEncoding",
+    "evaluate_transformer",
+    "MaskedAutoencoder",
+    "MAEEncoder",
+    "MAEDecoder",
+    "MAEPretrainer",
+    "prepare_pretraining_data",
 ]

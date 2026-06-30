@@ -110,6 +110,15 @@ from bah2026.features.causal_network import (
     extract_causal_network_features,
     get_causal_feature_names,
 )
+from bah2026.features.advanced_features import (
+    extract_all_advanced_features,
+    get_advanced_feature_names,
+    extract_temporal_derivatives,
+    extract_multiscale_features,
+    extract_goes_timeseries_features,
+    extract_per_window_spectral,
+    extract_wavelet_scalogram_features,
+)
 
 __all__ = [
     # Feature engineering
@@ -156,4 +165,12 @@ __all__ = [
     "build_causal_network",
     "extract_causal_network_features",
     "get_causal_feature_names",
+    # Advanced features (v3)
+    "extract_all_advanced_features",
+    "get_advanced_feature_names",
+    "extract_temporal_derivatives",
+    "extract_multiscale_features",
+    "extract_goes_timeseries_features",
+    "extract_per_window_spectral",
+    "extract_wavelet_scalogram_features",
 ]

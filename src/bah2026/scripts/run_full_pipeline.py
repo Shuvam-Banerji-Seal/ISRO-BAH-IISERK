@@ -169,7 +169,11 @@ def _feature_worker_inner(d, event_times, hdf5_dir):
 
     try:
         pi = load_solexs_pi(d)
-        if pi["counts"].size > 0:
+    except Exception:
+        pi = None
+
+    if pi is not None and pi["counts"].size > 0:
+        try:
             summed = np.nansum(pi["counts"][:300, :], axis=0)
             if np.sum(summed) > 100:
                 T, EM, chi2 = fit_temperature(summed)
@@ -177,8 +181,8 @@ def _feature_worker_inner(d, event_times, hdf5_dir):
                     precomputed["sxr_temperature_mk"] = float(T)
                     precomputed["sxr_emission_measure"] = float(EM)
                     precomputed["sxr_chi2_red"] = float(chi2)
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     for det, num, key in [
         ("czt", 1, "hxr_spectral_index_gamma"),
@@ -228,6 +232,8 @@ def _feature_worker_inner(d, event_times, hdf5_dir):
     except Exception:
         pass
 
+    goes_xrsb_full = None
+    goes_xrsa_full = None
     try:
         gdir = Path(hdf5_dir).parents[2] / "data" / "external" / "goes"
         for nc_file in gdir.glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
@@ -244,13 +250,17 @@ def _feature_worker_inner(d, event_times, hdf5_dir):
                     gf = np.where(
                         nc.variables[band][:] < 0, np.nan, nc.variables[band][:]
                     ).astype(np.float64)
-                    fi = interp1d(gt_mjd, gf, bounds_error=False, fill_value=np.nan)
-                    interp = fi(solexs_mjd[:3600])
+                    fi = interp1d(gt_mjd, gf, bounds_error=False, fill_value=0.0)
+                    full_interp = np.nan_to_num(fi(solexs_mjd), nan=0.0)
                     precomputed[key] = (
-                        float(np.nanmean(interp))
-                        if np.any(np.isfinite(interp))
+                        float(np.nanmean(full_interp))
+                        if np.any(np.isfinite(full_interp))
                         else 0.0
                     )
+                    if band == "xrsb_flux":
+                        goes_xrsb_full = full_interp
+                    else:
+                        goes_xrsa_full = full_interp
                 if precomputed["goes_xrsb_flux"] > 0:
                     precomputed["goes_xrsa_xrsb_ratio"] = (
                         precomputed["goes_xrsa_flux"] / precomputed["goes_xrsb_flux"]
@@ -272,9 +282,40 @@ def _feature_worker_inner(d, event_times, hdf5_dir):
                     precomputed[f"{prefix}_total_max"] = float(np.max(v))
                     precomputed[f"{prefix}_total_std"] = float(np.std(v))
 
+    if (
+        combined_hxr is not None
+        and combined_hxr.ndim == 2
+        and combined_hxr.shape[1] >= 5
+    ):
+        try:
+            from bah2026.features.causal_network import (
+                granger_causality_simple,
+                mediation_analysis,
+            )
+
+            ml = min(len(counts), combined_hxr.shape[0])
+            ds = 10
+            dsxr_day = np.diff(counts[:ml][::ds])
+            hxr_day = combined_hxr[:ml, 4][::ds]
+            gc = granger_causality_simple(hxr_day, dsxr_day, max_lag=30, n_splits=3)
+            precomputed["neupert_granger_improvement"] = float(gc["improvement"])
+            precomputed["neupert_best_lag"] = float(gc["best_lag"])
+            if combined_hxr.shape[1] > 6:
+                med = mediation_analysis(
+                    combined_hxr[:ml, 1][::ds],
+                    combined_hxr[:ml, 6][::ds],
+                    counts[:ml][::ds],
+                )
+                precomputed["max_mediation_proportion"] = float(
+                    med["mediation_proportion"]
+                )
+        except Exception:
+            pass
+
     lookback, step = 3600, 300
     canonical = get_canonical_feature_names()
     rows, y_list = [], []
+    prev_gamma = 0.0
     for i in range(lookback, len(counts), step):
         sxr_win = counts[i - lookback : i]
         hxr_win = (
@@ -287,6 +328,61 @@ def _feature_worker_inner(d, event_times, hdf5_dir):
         )
         if feat is None:
             continue
+
+        try:
+            from bah2026.features.advanced_features import extract_all_advanced_features
+
+            hxr_full_win = (
+                np.nansum(hxr_win[:, :5], axis=1)
+                if hxr_win is not None and hxr_win.ndim == 2 and hxr_win.shape[1] >= 5
+                else None
+            )
+            goes_xrsb_win = (
+                goes_xrsb_full[i - lookback : i] if goes_xrsb_full is not None else None
+            )
+            goes_xrsa_win = (
+                goes_xrsa_full[i - lookback : i] if goes_xrsa_full is not None else None
+            )
+            adv = extract_all_advanced_features(
+                sxr_win,
+                hxr_full_win,
+                hxr_win,
+                pi_counts=None,
+                goes_xrsb=goes_xrsb_win,
+                goes_xrsa=goes_xrsa_win,
+                prev_gamma=prev_gamma,
+            )
+            feat.update(adv)
+        except Exception:
+            pass
+
+        try:
+            from bah2026.features.causal_network import (
+                extract_causal_network_features,
+            )
+
+            if hxr_win is not None and hxr_win.ndim == 2 and hxr_win.shape[1] >= 5:
+                ml = min(len(sxr_win), hxr_win.shape[0])
+                ds = 10
+                band_data = {
+                    "SXR_2_22": sxr_win[:ml][::ds],
+                    "CZT_20_40": hxr_win[:ml, 0][::ds],
+                    "CZT_40_60": hxr_win[:ml, 1][::ds],
+                    "CZT_60_80": hxr_win[:ml, 2][::ds],
+                    "CZT_80_150": hxr_win[:ml, 3][::ds],
+                    "CZT_18_160": hxr_win[:ml, 4][::ds],
+                }
+                if hxr_win.shape[1] > 5:
+                    band_data["CdTe_5_20"] = hxr_win[:ml, 5][::ds]
+                    band_data["CdTe_20_30"] = hxr_win[:ml, 6][::ds]
+                causal_feat = extract_causal_network_features(band_data, max_lag=20)
+                feat.update(causal_feat)
+        except Exception:
+            pass
+
+        if "hxr_spectral_index_gamma" in feat and feat["hxr_spectral_index_gamma"] > 0:
+            prev_gamma = feat["hxr_spectral_index_gamma"]
+
         rows.append(pad_features_to_canonical(feat, canonical))
         t = time_s[i]
         y_list.append(1 if any(0 < et - t <= 1800 for et in event_times) else 0)

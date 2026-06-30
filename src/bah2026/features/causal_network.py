@@ -96,7 +96,7 @@ def granger_causality_simple(
 
             try:
                 model_r = RidgeCV(alphas=[0.1, 1.0, 10.0]).fit(Xr_train, y_train)
-                model_f = RidgeCV(alphas=[0.1, 1.0, 10.0]).fit(Xf_train, y_f_train)
+                model_f = RidgeCV(alphas=[0.1, 1.0, 10.0]).fit(Xf_train, y_train)
                 r2_r += r2_score(y_test, model_r.predict(Xr_test))
                 r2_f += r2_score(y_test, model_f.predict(Xf_test))
                 n_folds += 1
