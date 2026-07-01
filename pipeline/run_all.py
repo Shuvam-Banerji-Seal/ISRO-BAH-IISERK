@@ -26,7 +26,8 @@ PHASES = {
     6: ("phase6_spectral", "extract"),
     7: ("phase7_nonlinear", "extract"),
     8: ("phase8_event", "extract"),
-    9: ("phase9_assemble", "assemble"),
+    9: ("phase10_extended", "extract"),
+    10: ("phase9_assemble", "assemble"),
 }
 
 
@@ -69,7 +70,7 @@ def main():
             run_phase(phase)
         except ValueError:
             print(f"Usage: {sys.argv[0]} [phase_number]")
-            print(f"  No args = run all phases (1-9)")
+            print(f"  No args = run all phases (1-10)")
     else:
         print("STAGE 2 — Feature Engineering Pipeline")
         t_start = time.time()

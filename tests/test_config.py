@@ -25,18 +25,14 @@ from bah2026.config import (
     FEATURE_SPECTRAL_ENTROPY_NPERSEG,
     FEATURE_AUTOCORR_LAGS,
     FEATURE_PERCENTILES,
-    FORECAST_TRAIN_RATIO,
-    FORECAST_VAL_RATIO,
-    FORECAST_TEST_RATIO,
+
     LGBM_N_ESTIMATORS,
     LGBM_LEARNING_RATE,
     LGBM_MAX_DEPTH,
     XGB_N_ESTIMATORS,
     XGB_LEARNING_RATE,
     XGB_MAX_DEPTH,
-    CATBOOST_ITERATIONS,
-    CATBOOST_LEARNING_RATE,
-    CATBOOST_DEPTH,
+    CNNLSTM_N_FEATURES,
     CNNLSTM_INPUT_LEN,
     CNNLSTM_N_CHANNELS,
     CNNLSTM_LR,
@@ -100,16 +96,6 @@ def test_feature_params():
     assert len(FEATURE_PERCENTILES) > 0
 
 
-def test_forecast_params():
-    assert 0 < FORECAST_TRAIN_RATIO < 1
-    assert 0 < FORECAST_VAL_RATIO < 1
-    assert 0 < FORECAST_TEST_RATIO < 1
-    assert (
-        abs(FORECAST_TRAIN_RATIO + FORECAST_VAL_RATIO + FORECAST_TEST_RATIO - 1.0)
-        < 0.01
-    )
-
-
 def test_lgbm_params():
     assert LGBM_N_ESTIMATORS >= 100
     assert 0 < LGBM_LEARNING_RATE <= 0.5
@@ -122,13 +108,8 @@ def test_xgb_params():
     assert XGB_MAX_DEPTH >= 3
 
 
-def test_catboost_params():
-    assert CATBOOST_ITERATIONS >= 100
-    assert 0 < CATBOOST_LEARNING_RATE <= 0.5
-    assert CATBOOST_DEPTH >= 3
-
-
 def test_cnnlstm_params():
+    assert CNNLSTM_N_FEATURES > 0
     assert CNNLSTM_INPUT_LEN > 0
     assert CNNLSTM_N_CHANNELS > 0
     assert CNNLSTM_LR > 0

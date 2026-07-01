@@ -81,14 +81,20 @@ class CNNLSTMv3(nn.Module):
 
     Input:  (B, n_channels, seq_len)  e.g. (B, 12, 3600)
     Output: (B,) flare probabilities in [0, 1].
+
+    When n_features > 0, the forward pass accepts an additional ``features``
+    tensor of shape (B, n_features). The features are projected
+    (Linear 128 → LayerNorm → GELU), expanded to (B, T, 128), and
+    concatenated with the Conv1D output on the channel dim before BiLSTM.
     """
 
-    def __init__(self, n_channels: int = 12, seq_len: int = 3600):
+    def __init__(self, n_channels: int = 12, seq_len: int = 3600, n_features: int = 0):
         super().__init__()
         self.n_channels = n_channels
         self.seq_len = seq_len
+        self.n_features = n_features
 
-        self.features = nn.Sequential(
+        self.conv = nn.Sequential(
             nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
             nn.BatchNorm1d(32),
             nn.GELU(),
@@ -107,8 +113,18 @@ class CNNLSTMv3(nn.Module):
             nn.AdaptiveAvgPool1d(32),
         )
 
+        conv_out_dim = 256
+        lstm_in_dim = conv_out_dim
+        if n_features > 0:
+            self.feature_proj = nn.Sequential(
+                nn.Linear(n_features, 128),
+                nn.LayerNorm(128),
+                nn.GELU(),
+            )
+            lstm_in_dim = conv_out_dim + 128
+
         self.lstm = nn.LSTM(
-            256,
+            lstm_in_dim,
             256,
             num_layers=2,
             batch_first=True,
@@ -129,9 +145,13 @@ class CNNLSTMv3(nn.Module):
             nn.Sigmoid(),
         )
 
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.features(x)
+    def forward(self, x: Tensor, features: Tensor | None = None) -> Tensor:
+        x = self.conv(x)
         x = x.permute(0, 2, 1)
+        if features is not None and self.n_features > 0:
+            f = self.feature_proj(features)
+            f = f.unsqueeze(1).expand(-1, x.size(1), -1)
+            x = torch.cat([x, f], dim=-1)
         x, _ = self.lstm(x)
         x = self.attention(x)
         x = self.head(x)
@@ -193,10 +213,16 @@ def evaluate_model(
         else nullcontext()
     )
     with torch.no_grad():
-        for xb, yb in loader:
+        for batch in loader:
+            if len(batch) == 3:
+                xb, fb, yb = batch
+                fb = fb.to(device)
+            else:
+                xb, yb = batch
+                fb = None
             xb = xb.to(device)
             with amp_ctx:
-                p = model(xb)
+                p = model(xb, features=fb)
             probs_list.append(p.float().cpu().numpy())
             labels_list.append(yb.cpu().numpy())
     probs = np.concatenate(probs_list)
@@ -253,6 +279,7 @@ class FlareForecasterCNNLSTMv3:
         self,
         n_channels: int = 12,
         seq_len: int = 3600,
+        n_features: int = 0,
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
         focal_gamma: float = 2.0,
@@ -268,13 +295,14 @@ class FlareForecasterCNNLSTMv3:
 
         self.n_channels = n_channels
         self.seq_len = seq_len
+        self.n_features = n_features
         self.lr = lr
         self.weight_decay = weight_decay
         self.focal_gamma = focal_gamma
         self.focal_alpha = focal_alpha
         self.pos_weight = pos_weight
 
-        self.model = CNNLSTMv3(n_channels, seq_len).to(self.device)
+        self.model = CNNLSTMv3(n_channels, seq_len, n_features).to(self.device)
         self.criterion = FocalLoss(
             gamma=focal_gamma, alpha=focal_alpha, pos_weight=pos_weight
         )
@@ -318,17 +346,25 @@ class FlareForecasterCNNLSTMv3:
             else nullcontext()
         )
 
+        def _unpack(batch):
+            if len(batch) == 3:
+                return batch[0], batch[1], batch[2]
+            return batch[0], None, batch[1]
+
         for epoch in range(1, epochs + 1):
             self.model.train()
             running_loss = 0.0
             n_seen = 0
-            for xb, yb in train_loader:
+            for batch in train_loader:
+                xb, fb, yb = _unpack(batch)
                 xb = xb.to(self.device)
+                if fb is not None:
+                    fb = fb.to(self.device)
                 yb = yb.to(self.device).float()
                 self.optimizer.zero_grad()
                 if self.use_amp:
                     with amp_ctx:
-                        pred = self.model(xb)
+                        pred = self.model(xb, features=fb)
                         loss = self.criterion(pred, yb)
                     self.scaler.scale(loss).backward()
                     self.scaler.unscale_(self.optimizer)
@@ -338,7 +374,7 @@ class FlareForecasterCNNLSTMv3:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    pred = self.model(xb)
+                    pred = self.model(xb, features=fb)
                     loss = self.criterion(pred, yb)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
@@ -356,11 +392,14 @@ class FlareForecasterCNNLSTMv3:
             probs_list: list[np.ndarray] = []
             labels_list: list[np.ndarray] = []
             with torch.no_grad():
-                for xb, yb in val_loader:
+                for batch in val_loader:
+                    xb, fb, yb = _unpack(batch)
                     xb = xb.to(self.device)
+                    if fb is not None:
+                        fb = fb.to(self.device)
                     yb = yb.to(self.device).float()
                     with amp_ctx:
-                        pred = self.model(xb)
+                        pred = self.model(xb, features=fb)
                         loss = self.criterion(pred, yb)
                     val_loss_sum += loss.item() * xb.size(0)
                     val_n += xb.size(0)
@@ -435,10 +474,16 @@ class FlareForecasterCNNLSTMv3:
             else nullcontext()
         )
         with torch.no_grad():
-            for xb, _ in loader:
+            for batch in loader:
+                if len(batch) == 3:
+                    xb, fb, _ = batch
+                    fb = fb.to(self.device)
+                else:
+                    xb, _ = batch
+                    fb = None
                 xb = xb.to(self.device)
                 with amp_ctx:
-                    p = self.model(xb)
+                    p = self.model(xb, features=fb)
                 preds.append(p.float().cpu().numpy())
         return np.concatenate(preds)
 
@@ -452,6 +497,7 @@ class FlareForecasterCNNLSTMv3:
                 "config": {
                     "n_channels": self.n_channels,
                     "seq_len": self.seq_len,
+                    "n_features": self.n_features,
                     "lr": self.lr,
                     "weight_decay": self.weight_decay,
                     "focal_gamma": self.focal_gamma,

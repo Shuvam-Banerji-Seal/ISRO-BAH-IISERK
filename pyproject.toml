@@ -28,9 +28,7 @@ dependencies = [
     "requests>=2.34.2",
     "websockets>=16.0",
     "playwright>=1.60.0",
-    "lightgbm>=4.3",
-    "xgboost>=2.1",
-    "catboost>=1.2",
+
     "streamlit>=1.37",
     "plotly>=5.24",
     "PyWavelets>=1.7",

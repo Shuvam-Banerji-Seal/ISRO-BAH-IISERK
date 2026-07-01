@@ -1,4 +1,4 @@
-"""
+`"""
 BAH 2026 Challenge 15 — Solar Flare Nowcasting & Forecasting Pipeline.
 
 Usage:
@@ -1184,13 +1184,8 @@ def cmd_features(
     return X, y, fnames
 
 
-def cmd_forecast(
-    X: np.ndarray | None = None,
-    y: np.ndarray | None = None,
-    feature_names: list[str] | None = None,
-) -> dict:
-    """Phase 4: Train and evaluate forecasting models with proper time-series CV.
 
+<<<<<<< HEAD
     Key fixes from v0:
       - Data comes in chronological day order (from cmd_features using imap)
       - Train/val/test split by day with embargo to prevent leakage
@@ -1340,6 +1335,8 @@ def cmd_forecast(
     plot_model_evaluation(results)
     print(f"Results: {CATALOGS_DIR / 'forecast_results.json'}")
     return results
+=======
+>>>>>>> 5df5451 (add stage 3 forecasting and nowcasting pipeline)
 
 
 def cmd_train() -> dict:
@@ -1435,7 +1432,6 @@ def main():
             "explore",
             "nowcast",
             "features",
-            "forecast",
             "plots",
             "init-config",
             "build-hdf5",
@@ -1447,7 +1443,7 @@ def main():
     print("=" * 60)
     print("  BAH 2026 — Challenge 15: Solar Flare Pipeline")
     print("  Aditya-L1: SoLEXS (soft X-ray) + HEL1OS (hard X-ray)")
-    print("  Method: SWPC onset + HXR coincidence + LightGBM/XGBoost/CatBoost")
+    print("  Method: SWPC onset + HXR coincidence + CNN-LSTM + Transformer ensemble")
     print(
         f"  GPU: deferred (detected at forecast step — call bah2026.config.detect_gpu())"
     )
@@ -1477,8 +1473,6 @@ def main():
         events_df = cmd_nowcast(days)
     if cmd in ("all", "features"):
         X, y, fnames = cmd_features(days, events_df)
-    if cmd in ("all", "forecast"):
-        cmd_forecast(X, y, fnames)
     if cmd == "build-hdf5":
         cmd_build_hdf5()
     if cmd == "validate":

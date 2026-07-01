@@ -122,44 +122,6 @@ def sample_data():
     return X, y
 
 
-def test_lgbm_forecaster(sample_data):
-    X, y = sample_data
-    from bah2026.models.forecasting import FlareForecasterLightGBM
-
-    model = FlareForecasterLightGBM(n_estimators=50, scale_pos_weight=5.0)
-    model.fit(X[:150], y[:150])
-    prob = model.predict_proba(X[150:])
-    assert prob.shape == (50,)
-    assert np.all(prob >= 0)
-    assert np.all(prob <= 1)
-    imp = model.feature_importance()
-    assert len(imp) == 10
-
-
-def test_xgb_forecaster(sample_data):
-    X, y = sample_data
-    from bah2026.models.forecasting import FlareForecasterXGBoost
-
-    model = FlareForecasterXGBoost(n_estimators=50, scale_pos_weight=5.0)
-    model.fit(X[:150], y[:150])
-    prob = model.predict_proba(X[150:])
-    assert prob.shape == (50,)
-    assert np.all(prob >= 0)
-    assert np.all(prob <= 1)
-
-
-def test_catboost_forecaster(sample_data):
-    X, y = sample_data
-    from bah2026.models.forecasting import FlareForecasterCatBoost
-
-    model = FlareForecasterCatBoost(iterations=50)
-    model.fit(X[:150], y[:150])
-    prob = model.predict_proba(X[150:])
-    assert prob.shape == (50,)
-    assert np.all(prob >= 0)
-    assert np.all(prob <= 1)
-
-
 def test_cnnlstm_forecaster(sample_data):
     X, y = sample_data
     X_seq = np.random.randn(50, 12, 100).astype(np.float32)

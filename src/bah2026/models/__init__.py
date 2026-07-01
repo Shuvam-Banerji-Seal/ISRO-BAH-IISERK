@@ -12,9 +12,6 @@ from bah2026.models.nowcasting import (
     background_subtract_iterative,
 )
 from bah2026.models.forecasting import (
-    FlareForecasterLightGBM,
-    FlareForecasterXGBoost,
-    FlareForecasterCatBoost,
     FlareForecasterCNNLSTM,
 )
 from bah2026.models.cnn_lstm_v3 import (
@@ -49,9 +46,6 @@ __all__ = [
     "classify_flare_goes",
     "background_subtract_simple",
     "background_subtract_iterative",
-    "FlareForecasterLightGBM",
-    "FlareForecasterXGBoost",
-    "FlareForecasterCatBoost",
     "FlareForecasterCNNLSTM",
     # v3 models
     "CNNLSTMv3",

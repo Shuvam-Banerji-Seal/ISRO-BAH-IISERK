@@ -16,6 +16,7 @@ PHASES = [
     ("phase6_spectral", Path("dist/features/phase6_spectral_index.npz")),
     ("phase7_nonlinear", Path("dist/features/phase7_nonlinear.npz")),
     ("phase8_event", Path("dist/features/phase8_event_aux.npz")),
+    ("phase10_extended", Path("dist/features/phase10_extended.npz")),
 ]
 OUT_DIR = Path("dist")
 OUT_DIR.mkdir(parents=True, exist_ok=True)

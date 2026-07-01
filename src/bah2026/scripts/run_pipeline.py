@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Run the full BAH 2026 pipeline: nowcast → features → forecast.
+Run the BAH 2026 pipeline: nowcast → features.
 All data sources used, GPU accelerated where possible.
 
 Usage:
     python -m bah2026.scripts.run_pipeline              # full run
     python -m bah2026.scripts.run_pipeline --nowcast    # step 1 only
     python -m bah2026.scripts.run_pipeline --features   # step 2 only
-    python -m bah2026.scripts.run_pipeline --forecast   # step 3 only
     python -m bah2026.scripts.run_pipeline --gpu-bench  # test GPU performance
 """
 
@@ -140,39 +139,6 @@ def step_features() -> tuple:
     return X, y, fnames
 
 
-def step_forecast(X=None, y=None, fnames=None) -> dict:
-    """Train forecasting models with GPU acceleration."""
-    section("[3/3] Forecast — GPU-Accelerated Training")
-
-    from bah2026.main import cmd_forecast
-    from bah2026.config import HDF5_DIR, has_gpu
-    import numpy as np
-
-    if X is None:
-        log.info("Loading cached features...")
-        X = np.load(HDF5_DIR / "X_features.npy")
-        y = np.load(HDF5_DIR / "y_labels.npy")
-        fn_path = HDF5_DIR / "feature_names.json"
-        fnames = json.loads(fn_path.read_text()) if fn_path.exists() else []
-        log.info(f"Loaded: X={X.shape}, y={y.shape}")
-
-    log.info(f"GPU available: {has_gpu()}")
-    log.info("Training LightGBM (CPU, 24 cores) + CatBoost (GPU) + XGBoost (CPU)...")
-
-    t0 = time.time()
-    results = cmd_forecast(X, y, fnames)
-    elapsed = time.time() - t0
-
-    for name, r in results.items():
-        log.info(
-            f"  {name}: TSS={r['tss']:.3f}  AUC-ROC={r['auc_roc']:.3f}  "
-            f"HSS={r['hss']:.3f}  F1={r['f1']:.3f}  "
-            f"P={r['precision']:.3f}  R={r['recall']:.3f}  "
-            f"thr={r.get('best_threshold', 0.5):.2f}"
-        )
-    log.info(f"Training time: {elapsed:.0f}s")
-
-    return results
 
 
 def main():
@@ -183,7 +149,6 @@ def main():
     parser.add_argument(
         "--features", action="store_true", help="Run feature extraction only"
     )
-    parser.add_argument("--forecast", action="store_true", help="Run forecasting only")
     parser.add_argument("--gpu-bench", action="store_true", help="GPU benchmark only")
     parser.add_argument(
         "--all", action="store_true", default=True, help="Run all steps (default)"
@@ -191,7 +156,7 @@ def main():
     args = parser.parse_args()
 
     # If no specific step, run all
-    run_all = not (args.nowcast or args.features or args.forecast or args.gpu_bench)
+    run_all = not (args.nowcast or args.features or args.gpu_bench)
 
     log.info(f"BAH 2026 Pipeline — Full data (12/12 sources) + GPU")
     from bah2026.config import N_WORKERS
@@ -212,13 +177,8 @@ def main():
 
     if args.features or run_all:
         X, y, fnames = step_features()
-    else:
-        X = y = fnames = None
 
-    if args.forecast or run_all:
-        step_forecast(X, y, fnames)
-
-    log.info("Pipeline complete.")
+    log.info("Pipeline complete. Use run_master_pipeline for DL training.")
 
 
 if __name__ == "__main__":

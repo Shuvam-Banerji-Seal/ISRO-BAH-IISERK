@@ -4,10 +4,10 @@
 Phases:
   1. GPU feature extraction (0.9s/day → ~18min total)
   2. Sequence data preparation (~2h, parallel CPU)
-  3. GBDT training with Optuna (~1h GPU)
-  4. CNN-LSTM training (~3h GPU)
-  5. Transformer training (~3h GPU)
-  6. Ensemble stacking + evaluation (~30min)
+  3. CNN-LSTM v3 training with feature injection (~3h GPU)
+  4. MAE self-supervised pretraining (~2h GPU)
+  5. Transformer training with Neupert physics loss (~3h GPU)
+  6. Ensemble + final evaluation (~30min)
 """
 
 from __future__ import annotations
@@ -390,97 +390,12 @@ def phase_sequences(df):
         log.info(f"X_seq_ds10: {X_ds.shape}")
 
 
-def phase_forest(X, y, fnames):
-    from bah2026.config import CATALOGS_DIR, detect_gpu
-    from bah2026.models import (
-        FlareForecasterCatBoost,
-        FlareForecasterXGBoost,
-        FlareForecasterLightGBM,
-    )
-    from sklearn.metrics import (
-        confusion_matrix,
-        roc_auc_score,
-        average_precision_score,
-        f1_score,
-    )
-    from sklearn.preprocessing import StandardScaler
-
-    detect_gpu()
-    n = len(X)
-    tr = int(n * 0.70)
-    va = int(n * 0.85)
-    Xtr, ytr = X[:tr], y[:tr]
-    Xva, yva = X[tr:va], y[tr:va]
-    Xte, yte = X[va:], y[va:]
-
-    sc = StandardScaler()
-    Xtr_s, Xva_s, Xte_s = sc.fit_transform(Xtr), sc.transform(Xva), sc.transform(Xte)
-
-    pw = max(1.0, (ytr == 0).sum() / max((ytr == 1).sum(), 1))
-    log.info(
-        f"Train {len(Xtr)} ({ytr.sum()} pos) | Val {len(Xva)} ({yva.sum()} pos) | Test {len(Xte)} ({yte.sum()} pos)"
-    )
-
-    models = {
-        "LightGBM": FlareForecasterLightGBM(scale_pos_weight=pw),
-        "XGBoost": FlareForecasterXGBoost(scale_pos_weight=pw),
-        "CatBoost": FlareForecasterCatBoost(),
-    }
-    results = {}
-    for name, model in models.items():
-        t0 = time.time()
-        model.fit(Xtr_s, ytr, Xva_s, yva)
-        prob = model.predict_proba(Xte_s)
-        best_thr = 0.5
-        if yva.sum() > 0:
-            val_prob = model.predict_proba(Xva_s)
-            best_tss = -1.0
-            for thr in np.linspace(0.01, 0.99, 99):
-                vp = (val_prob > thr).astype(int)
-                tn, fp, fn, tp = confusion_matrix(yva, vp).ravel()
-                tss = tp / max(tp + fn, 1) - fp / max(fp + tn, 1)
-                if tss > best_tss:
-                    best_tss, best_thr = tss, thr
-        pred = (prob > best_thr).astype(int)
-        tn, fp, fn, tp = confusion_matrix(yte, pred).ravel()
-        tss = tp / max(tp + fn, 1) - fp / max(fp + tn, 1)
-        hss_num = 2 * (tp * tn - fp * fn)
-        hss_den = (tp + fn) * (fn + tn) + (tp + fp) * (fp + tn)
-        r = {
-            "auc_roc": float(roc_auc_score(yte, prob)) if yte.sum() > 0 else 0.0,
-            "auc_pr": float(average_precision_score(yte, prob))
-            if yte.sum() > 0
-            else 0.0,
-            "tss": float(tss),
-            "hss": float(hss_num / max(hss_den, 1)),
-            "f1": float(f1_score(yte, pred, zero_division=0)),
-            "precision": float(tp / max(tp + fp, 1)),
-            "recall": float(tp / max(tp + fn, 1)),
-            "best_threshold": float(best_thr),
-            "tp": int(tp),
-            "fp": int(fp),
-            "fn": int(fn),
-            "tn": int(tn),
-            "train_time_s": time.time() - t0,
-        }
-        results[name] = r
-        log.info(
-            f"  {name}: TSS={tss:.3f} HSS={hss_num / max(hss_den, 1):.3f} AUC={r['auc_roc']:.3f} ({(time.time() - t0):.0f}s)"
-        )
-
-    CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
-    (CATALOGS_DIR / "v3_forecast_results.json").write_text(
-        json.dumps(results, indent=2)
-    )
-    return results
-
-
-def phase_cnn_lstm(X_seq_path, y_seq_path):
+def phase_cnn_lstm(X_seq_path, y_seq_path, X_feat_path=None):
     import torch
-    from torch.utils.data import DataLoader
-    from bah2026.data.sequence_builder import SequenceDataset, create_dataloaders
+    from torch.utils.data import DataLoader, TensorDataset
+    from bah2026.data.sequence_builder import create_dataloaders
     from bah2026.models.cnn_lstm_v3 import FlareForecasterCNNLSTMv3, evaluate_model
-    from bah2026.config import CATALOGS_DIR, HDF5_DIR, detect_gpu, N_WORKERS
+    from bah2026.config import CATALOGS_DIR, HDF5_DIR, detect_gpu, N_WORKERS, CNNLSTM_N_FEATURES
 
     detect_gpu()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -495,15 +410,11 @@ def phase_cnn_lstm(X_seq_path, y_seq_path):
     test_idx = np.arange(va, n)
 
     loaders = create_dataloaders(
-        str(X_seq_path),
-        str(y_seq_path),
-        train_idx,
-        val_idx,
-        test_idx,
-        batch_size=256,
+        str(X_seq_path), str(y_seq_path), X_feat_path,
+        train_idx, val_idx, test_idx, batch_size=256,
     )
 
-    model = FlareForecasterCNNLSTMv3(device=str(device))
+    model = FlareForecasterCNNLSTMv3(n_features=CNNLSTM_N_FEATURES, device=str(device))
     ckpt = str(HDF5_DIR / "cnn_lstm_v3_best.pt")
     history = model.fit(
         loaders["train"], loaders["val"], epochs=50, patience=10, checkpoint_path=ckpt
@@ -515,16 +426,107 @@ def phase_cnn_lstm(X_seq_path, y_seq_path):
     return history
 
 
+def phase_mae_pretrain(X_seq_path):
+    """Masked Autoencoder self-supervised pretraining."""
+    from bah2026.models.mae_pretrain import MAEPretrainer
+    from bah2026.config import HDF5_DIR
+
+    log.info("MAE pretraining phase")
+    X = np.load(X_seq_path, mmap_mode="r")
+    ds_factor = 10
+    if X.shape[-1] >= ds_factor:
+        N, C, T = X.shape
+        T_new = T // ds_factor
+        X_ds = X[:, :, :T_new * ds_factor].reshape(N, C, T_new, ds_factor).mean(axis=-1)
+        X_ds = np.ascontiguousarray(X_ds, dtype=np.float32)
+    else:
+        X_ds = np.ascontiguousarray(X, dtype=np.float32)
+
+    from torch.utils.data import TensorDataset, DataLoader
+    split = int(len(X_ds) * 0.85)
+    train_loader = DataLoader(TensorDataset(torch.from_numpy(X_ds[:split])),
+                               batch_size=512, shuffle=True, num_workers=min(8, N_WORKERS))
+    val_loader = DataLoader(TensorDataset(torch.from_numpy(X_ds[split:])),
+                             batch_size=1024, num_workers=min(4, N_WORKERS))
+
+    pretrainer = MAEPretrainer(n_channels=X.shape[1], seq_len=X_ds.shape[2])
+    ckpt = str(HDF5_DIR / "mae_encoder.pt")
+    history = pretrainer.pretrain(train_loader, val_loader, epochs=50, checkpoint_path=ckpt)
+    log.info(f"MAE pretrain done: best loss {min(history['train_losses']):.6f}")
+    return ckpt
+
+
+def phase_transformer(X_seq_path, y_seq_path, mae_encoder_path=None):
+    """Train Spectral-Temporal Transformer with Neupert physics loss."""
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+    from bah2026.models.transformer import (
+        FlareForecasterTransformer,
+        evaluate_transformer,
+    )
+    from bah2026.config import CATALOGS_DIR, HDF5_DIR, detect_gpu
+
+    detect_gpu()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log.info(f"Transformer training on {device}")
+
+    ds_path = Path(str(X_seq_path).replace("X_seq.npy", "X_seq_ds10.npy"))
+    ds_y_path = Path(str(y_seq_path).replace("y_seq.npy", "y_seq_ds10.npy"))
+    if ds_path.exists() and ds_y_path.exists():
+        X = np.load(ds_path, mmap_mode="r")
+        y = np.load(ds_y_path, mmap_mode="r")
+    else:
+        X = np.load(X_seq_path, mmap_mode="r")
+        y = np.load(y_seq_path, mmap_mode="r")
+        ds_factor = 10
+        if X.shape[-1] >= ds_factor:
+            N, C, T = X.shape
+            T_new = T // ds_factor
+            X = X[:, :, :T_new * ds_factor].reshape(N, C, T_new, ds_factor).mean(axis=-1)
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    y = np.ascontiguousarray(y, dtype=np.int8)
+
+    n = len(y)
+    tr = int(n * 0.70)
+    va = int(n * 0.85)
+
+    def _dl(x, y_, bs, shuf=False):
+        return DataLoader(TensorDataset(torch.from_numpy(x), torch.from_numpy(y_)),
+                          batch_size=bs, shuffle=shuf, drop_last=False)
+
+    train_loader = _dl(X[:tr], y[:tr], 256, shuf=True)
+    val_loader = _dl(X[tr:va], y[tr:va], 256)
+    test_loader = _dl(X[va:], y[va:], 256)
+
+    model = FlareForecasterTransformer(device=str(device))
+    ckpt = str(HDF5_DIR / "transformer_best.pt")
+    history = model.fit(
+        train_loader, val_loader, epochs=100, patience=15,
+        checkpoint_path=ckpt, mae_encoder_path=mae_encoder_path,
+    )
+
+    metrics = evaluate_transformer(model.model, test_loader, model.device, mc_dropout=True)
+    log.info(
+        f"Transformer: ROC-AUC={metrics['roc_auc']:.4f} "
+        f"PR-AUC={metrics['pr_auc']:.4f} F1={metrics['f1']:.4f}"
+    )
+    (CATALOGS_DIR / "transformer_results.json").write_text(
+        json.dumps({"history": history, "metrics": metrics}, indent=2)
+    )
+    return history
+
+
 def main():
     parser = argparse.ArgumentParser(description="BAH 2026 v3 GPU Pipeline")
     parser.add_argument("--skip-features", action="store_true")
     parser.add_argument("--skip-sequences", action="store_true")
-    parser.add_argument("--skip-gbdt", action="store_true")
     parser.add_argument("--skip-cnn", action="store_true")
+    parser.add_argument("--skip-mae", action="store_true")
+    parser.add_argument("--skip-transformer", action="store_true")
     args = parser.parse_args()
 
     log.info("=" * 60)
-    log.info("BAH 2026 v3 Pipeline — 179 features, GPU-accelerated, ensemble")
+    log.info("BAH 2026 v3 Pipeline — 179 features, GPU-accelerated, Transformer + CNN-LSTM")
     log.info("=" * 60)
 
     from bah2026.config import CATALOGS_DIR, HDF5_DIR, ensure_output_dirs
@@ -537,27 +539,33 @@ def main():
         df = pd.read_csv(csv)
         log.info(f"Nowcast: {len(df)} events loaded")
 
-    X, y, fnames = None, None, None
     if not args.skip_features:
-        log.info("[1/4] GPU Feature Extraction")
+        log.info("[1/6] GPU Feature Extraction")
         X, y, fnames = phase_gpu_features(df)
 
     if not args.skip_sequences:
-        log.info("[2/4] Sequence Data Preparation")
+        log.info("[2/6] Sequence Data Preparation")
         phase_sequences(df)
 
-    if not args.skip_gbdt and X is not None:
-        log.info("[3/4] GBDT Training")
-        phase_forest(X, y, fnames)
+    seq_dir = HDF5_DIR / "sequences"
+    feat_path = HDF5_DIR / "X_features.npy"
+    X_seq = seq_dir / "X_seq.npy"
+    y_seq = seq_dir / "y_seq.npy"
+    mae_ckpt = None
 
-    if not args.skip_cnn:
-        seq_dir = HDF5_DIR / "sequences"
-        X_seq = seq_dir / "X_seq.npy"
-        y_seq = seq_dir / "y_seq.npy"
-        if X_seq.exists() and y_seq.exists():
-            log.info("[4/4] CNN-LSTM Training")
-            phase_cnn_lstm(X_seq, y_seq)
+    if not args.skip_cnn and X_seq.exists() and y_seq.exists():
+        log.info("[3/6] CNN-LSTM Training (feature injection)")
+        phase_cnn_lstm(X_seq, y_seq, X_feat_path=feat_path)
 
+    if not args.skip_mae and X_seq.exists():
+        log.info("[4/6] MAE Self-Supervised Pretraining")
+        mae_ckpt = phase_mae_pretrain(X_seq)
+
+    if not args.skip_transformer and X_seq.exists() and y_seq.exists():
+        log.info("[5/6] Transformer Training (MAE finetune: %s)", mae_ckpt or "none")
+        phase_transformer(X_seq, y_seq, mae_encoder_path=mae_ckpt)
+
+    log.info("[6/6] Ensemble — see run_master_pipeline --phase 9")
     log.info("=" * 60)
     log.info("v3 Pipeline complete!")
     log.info("=" * 60)

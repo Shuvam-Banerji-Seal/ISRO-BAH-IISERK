@@ -267,12 +267,16 @@ class SequenceDataset(torch.utils.data.Dataset):
     """Memory-mapped sequence dataset for PyTorch.
 
     Loads X_seq.npy and y_seq.npy with mmap_mode='r' for zero-copy access.
-    Supports data augmentation: time-shift, noise injection, channel dropout.
+    Optionally loads features from X_features.npy for injection into CNN-LSTM.
+
+    Returns ``(x, y)`` when no features are loaded, or ``(x, f, y)`` when
+    ``features_path`` is provided (backward-compatible).
     """
 
-    def __init__(self, x_path, y_path, indices=None, augment=False):
+    def __init__(self, x_path, y_path, indices=None, augment=False, features_path=None):
         self.X = np.load(x_path, mmap_mode="r")
         self.y = np.load(y_path, mmap_mode="r")
+        self.F = np.load(features_path, mmap_mode="r") if features_path else None
         if indices is not None:
             self.indices = np.asarray(indices)
         else:
@@ -288,6 +292,9 @@ class SequenceDataset(torch.utils.data.Dataset):
         y = self.y[actual_idx]
         if self.augment:
             x = self._augment(x)
+        if self.F is not None:
+            f = torch.from_numpy(self.F[actual_idx].copy()).float()
+            return torch.from_numpy(x).float(), f, torch.tensor(y, dtype=torch.float32)
         return torch.from_numpy(x).float(), torch.tensor(y, dtype=torch.float32)
 
     def _augment(self, x):
@@ -316,15 +323,20 @@ class SequenceDataset(torch.utils.data.Dataset):
 def create_dataloaders(
     x_path,
     y_path,
-    train_idx,
-    val_idx,
-    test_idx,
+    features_path=None,
+    train_idx=None,
+    val_idx=None,
+    test_idx=None,
     batch_size: int = 256,
 ) -> dict:
-    """Create train/val/test DataLoaders with appropriate settings."""
-    train_ds = SequenceDataset(x_path, y_path, indices=train_idx, augment=True)
-    val_ds = SequenceDataset(x_path, y_path, indices=val_idx, augment=False)
-    test_ds = SequenceDataset(x_path, y_path, indices=test_idx, augment=False)
+    """Create train/val/test DataLoaders with appropriate settings.
+
+    When ``features_path`` is provided, the datasets return ``(x, f, y)``
+    tuples for feature injection into CNN-LSTM v3.
+    """
+    train_ds = SequenceDataset(x_path, y_path, indices=train_idx, augment=True, features_path=features_path)
+    val_ds = SequenceDataset(x_path, y_path, indices=val_idx, augment=False, features_path=features_path)
+    test_ds = SequenceDataset(x_path, y_path, indices=test_idx, augment=False, features_path=features_path)
 
     return {
         "train": torch.utils.data.DataLoader(

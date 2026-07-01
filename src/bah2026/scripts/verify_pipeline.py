@@ -35,11 +35,7 @@ from bah2026.models.nowcasting import (
     detect_flares_hel1os,
     coincidence_merge,
 )
-from bah2026.models.forecasting import (
-    FlareForecasterLightGBM,
-    FlareForecasterXGBoost,
-    FlareForecasterCatBoost,
-)
+
 
 
 def section(title: str) -> None:
@@ -180,38 +176,6 @@ def test_detection() -> dict:
     return results
 
 
-def test_models() -> dict:
-    """Quick verification that forecasting models instantiate."""
-    section("Forecasting Model Verification")
-
-    rng = np.random.RandomState(42)
-    X = rng.randn(100, 10).astype(np.float32)
-    y = rng.randint(0, 2, 100)
-
-    models = {
-        "LightGBM": FlareForecasterLightGBM(n_estimators=10),
-        "XGBoost": FlareForecasterXGBoost(n_estimators=10),
-        "CatBoost": FlareForecasterCatBoost(iterations=10),
-    }
-
-    results = {}
-    for name, model in models.items():
-        try:
-            model.fit(X[:80], y[:80])
-            prob = model.predict_proba(X[80:])
-            results[name] = {
-                "ok": True,
-                "proba_shape": prob.shape,
-                "proba_range": (float(prob.min()), float(prob.max())),
-            }
-            print(f"  {name}: OK (proba {prob.min():.3f}..{prob.max():.3f})")
-        except Exception as e:
-            results[name] = {"ok": False, "error": str(e)}
-            print(f"  {name}: FAILED - {e}")
-
-    return results
-
-
 def test_split_integrity() -> dict:
     """Verify the chronological split produces non-leaky results."""
     section("Split Integrity Check")
@@ -268,7 +232,6 @@ def main() -> int:
     results["hel1os"] = test_hel1os_integrity()
     results["calibration"] = test_calibration()
     results["detection"] = test_detection()
-    results["models"] = test_models()
     results["split"] = test_split_integrity()
 
     # Summary

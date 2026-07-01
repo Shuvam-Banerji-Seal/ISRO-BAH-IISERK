@@ -90,15 +90,59 @@ CATBOOST_DEPTH = 8
 
 CNNLSTM_INPUT_LEN = 3600
 CNNLSTM_N_CHANNELS = 12
+CNNLSTM_N_FEATURES = 179
 CNNLSTM_LR = 1e-3
 CNNLSTM_EPOCHS = 50
 CNNLSTM_BATCH_SIZE = 64
 
-# ── External Data Paths ─────────────────────────────────────────────────────
+# ── External Data Paths ─────────────────────────z────────────────────────────
 
 GOES_DATA_DIR = Path(
     os.environ.get("BAH2026_GOES_DIR", str(PROJECT_ROOT / "data" / "external" / "goes"))
 )
+# ── Transformer / DL Parameters ─────────────────────────────────────────
+
+TRANSFORMER_D_MODEL = 256
+TRANSFORMER_NHEAD = 8
+TRANSFORMER_NUM_LAYERS = 4
+TRANSFORMER_LR = 5e-4
+TRANSFORMER_WEIGHT_DECAY = 0.01
+TRANSFORMER_EPOCHS = 100
+TRANSFORMER_BATCH_SIZE = 256
+TRANSFORMER_PATIENCE = 15
+TRANSFORMER_FOCAL_GAMMA = 2.0
+TRANSFORMER_FOCAL_ALPHA = 0.25
+TRANSFORMER_LAMBDA_PHYS = 0.1
+TRANSFORMER_SEQ_LEN = 360  # 1h at 10s cadence
+TRANSFORMER_DOWNSAMPLE = 10  # 1s -> 10s
+
+MAE_D_MODEL = 256
+MAE_LR = 1e-3
+MAE_WEIGHT_DECAY = 0.05
+MAE_EPOCHS = 50
+MAE_BATCH_SIZE = 512
+MAE_MASK_RATIO = 0.5
+
+# ── Download / Data Paths ────────────────────────────────────────────────
+
+RAW_DATA_DIR = Path(os.environ.get("BAH2026_RAW", PROJECT_ROOT / "data" / "raw"))
+PROCESSED_DATA_DIR = DATA_ROOT  # alias for backward compat
+EXTERNAL_DATA_DIR = PROJECT_ROOT / "data" / "external"
+GOES_DATA_DIR = EXTERNAL_DATA_DIR / "goes"
+
+# SoLEXS/HEL1OS download settings
+PRADAN_BASE_URL = "https://pradan1.issdc.gov.in"
+PRADAN_SOLEXS_URL = f"{PRADAN_BASE_URL}/browse/Aditya-L1/SoLEXS"
+PRADAN_HEL1OS_URL = f"{PRADAN_BASE_URL}/browse/Aditya-L1/HEL1OS"
+SOLEXS_ZIP_DIR = RAW_DATA_DIR / "solexs"
+HEL1OS_ZIP_DIR = RAW_DATA_DIR / "hel1os"
+SOLEXS_PROCESSED_DIR = PROCESSED_DATA_DIR / "solexs"
+HEL1OS_PROCESSED_DIR = PROCESSED_DATA_DIR / "hel1os"
+
+# GOES download settings
+GOES_BASE_URL = "https://data.ngdc.noaa.gov/platforms/solar-space-observing-satellites/goes/goes16/l2/data/xrsf-l2-flx1s"
+GOES_START_DATE = "2024-02-01"
+GOES_END_DATE = "2026-06-22"
 
 # ── Parallelism ──────────────────────────────────────────────────────────
 

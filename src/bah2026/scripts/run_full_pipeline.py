@@ -2,10 +2,9 @@
 """
 BAH 2026 — Complete Pipeline Runner (v2).
 
-Runs all three phases sequentially:
+Runs two phases:
   1. Nowcast  — SXR+HXR flare detection with corrections
   2. Features — 117-feature extraction with multiprocessing
-  3. Forecast — GPU-accelerated CatBoost/LightGBM/XGBoost training
 
 Usage:
     python -m bah2026.scripts.run_full_pipeline
@@ -444,111 +443,11 @@ def phase_features(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, list[str]]
     return X, y, canonical
 
 
-def phase_forecast(X, y, fnames):
-    from bah2026.config import (
-        CATALOGS_DIR,
-        FORECAST_TRAIN_RATIO,
-        FORECAST_VAL_RATIO,
-        detect_gpu,
-    )
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import (
-        roc_auc_score,
-        average_precision_score,
-        f1_score,
-        precision_score,
-        recall_score,
-        confusion_matrix,
-        balanced_accuracy_score,
-        matthews_corrcoef,
-        cohen_kappa_score,
-    )
-    from bah2026.models import (
-        FlareForecasterLightGBM,
-        FlareForecasterXGBoost,
-        FlareForecasterCatBoost,
-    )
-    import json, numpy as np
 
-    detect_gpu()
-    n = len(X)
-    tr = int(n * FORECAST_TRAIN_RATIO)
-    va = int(n * (FORECAST_TRAIN_RATIO + FORECAST_VAL_RATIO))
-    Xtr, ytr = X[:tr], y[:tr]
-    Xva, yva = X[tr:va], y[tr:va]
-    Xte, yte = X[va:], y[va:]
-
-    sc = StandardScaler()
-    Xtr_s, Xva_s, Xte_s = sc.fit_transform(Xtr), sc.transform(Xva), sc.transform(Xte)
-    pw = max(1.0, (ytr == 0).sum() / max((ytr == 1).sum(), 1))
-    log.info(
-        f"Train {len(Xtr)} ({ytr.sum()} pos) | Val {len(Xva)} ({yva.sum()} pos) | Test {len(Xte)} ({yte.sum()} pos)"
-    )
-
-    models = {
-        "LightGBM": FlareForecasterLightGBM(scale_pos_weight=pw),
-        "XGBoost": FlareForecasterXGBoost(scale_pos_weight=pw),
-        "CatBoost": FlareForecasterCatBoost(),
-    }
-    results = {}
-    for name, model in models.items():
-        t0 = time.time()
-        model.fit(Xtr_s, ytr, Xva_s, yva)
-        prob = model.predict_proba(Xte_s)
-        best_thr = 0.5
-        if yva.sum() > 0:
-            val_prob = model.predict_proba(Xva_s)
-            best_tss = -1.0
-            for thr in np.linspace(0.01, 0.99, 99):
-                vp = (val_prob > thr).astype(int)
-                tn, fp, fn, tp = confusion_matrix(yva, vp).ravel()
-                tss = tp / max(tp + fn, 1) - fp / max(fp + tn, 1)
-                if tss > best_tss:
-                    best_tss, best_thr = tss, thr
-        pred = (prob > best_thr).astype(int)
-        tn, fp, fn, tp = confusion_matrix(yte, pred).ravel()
-        tss = tp / max(tp + fn, 1) - fp / max(fp + tn, 1)
-        hss_num, hss_den = (
-            2 * (tp * tn - fp * fn),
-            (tp + fn) * (fn + tn) + (tp + fp) * (fp + tn),
-        )
-        r = {
-            "auc_roc": float(roc_auc_score(yte, prob)) if yte.sum() > 0 else 0.0,
-            "auc_pr": float(average_precision_score(yte, prob))
-            if yte.sum() > 0
-            else 0.0,
-            "tss": float(tss),
-            "hss": float(hss_num / max(hss_den, 1)),
-            "f1": float(f1_score(yte, pred, zero_division=0)),
-            "precision": float(precision_score(yte, pred, zero_division=0)),
-            "recall": float(recall_score(yte, pred, zero_division=0)),
-            "balanced_accuracy": float(balanced_accuracy_score(yte, pred)),
-            "mcc": float(matthews_corrcoef(yte, pred)),
-            "kappa": float(cohen_kappa_score(yte, pred)),
-            "best_threshold": float(best_thr),
-            "tp": int(tp),
-            "fp": int(fp),
-            "fn": int(fn),
-            "tn": int(tn),
-            "train_time_s": time.time() - t0,
-        }
-        results[name] = r
-        log.info(
-            f"  {name}: TSS={tss:.3f} HSS={hss_num / max(hss_den, 1):.3f} AUC={r['auc_roc']:.3f} F1={r['f1']:.3f} ({(time.time() - t0):.0f}s)"
-        )
-
-    CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
-    (CATALOGS_DIR / "forecast_results.json").write_text(
-        json.dumps(
-            {k: {kk: vv for kk, vv in v.items()} for k, v in results.items()}, indent=2
-        )
-    )
-    return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="BAH 2026 v2 — Complete Pipeline")
-    parser.add_argument("--skip-forecast", action="store_true")
     parser.add_argument("--skip-nowcast", action="store_true")
     args = parser.parse_args()
 
@@ -576,12 +475,8 @@ def main():
     log.info("[2/3] Features")
     X, y, fnames = phase_features(df)
 
-    if not args.skip_forecast and X.size > 0:
-        log.info("[3/3] Forecast")
-        phase_forecast(X, y, fnames)
-
     log.info("=" * 60)
-    log.info("Pipeline complete!")
+    log.info("Feature extraction complete! Use run_master_pipeline for DL training.")
     log.info("=" * 60)
 
 
