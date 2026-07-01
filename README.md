@@ -1,320 +1,297 @@
 # ISRO-BAH-IISERK — Solar Flare Forecasting with Aditya-L1
 
-**Bharatiya Antariksh Hackathon 2026 — Challenge #15**
-
-Automated pipeline combining **SoLEXS** (soft X-rays, 2–22 keV) and **HEL1OS** (hard X-rays, 1.8–160 keV) from Aditya-L1 to detect and predict solar flares.
+**Bharatiya Antariksh Hackathon 2026 — Challenge #15**  
+**Team:** IISER Kolkata  
+**Instruments:** SoLEXS (soft X-rays, 2–22 keV) + HEL1OS (hard X-rays, 1.8–160 keV)
 
 ---
 
-## Pipeline Workflow
+## Pipeline Overview
 
 ```mermaid
 graph TB
-    subgraph Data Acquisition
-        A[SoLEXS SDD2 LC] -->|86400 rows, 1s| B[Raw Counts]
-        C[HEL1OS 4 Detectors] -->|86400 rows, 1s| D[HXR Bands]
+    subgraph "📡 Data Ingestion"
+        A[SoLEXS SDD2 LC] -->|86400 rows × 1s| B[Raw SXR Counts]
+        C[HEL1OS CZT1/CZT2/CdTe1/CdTe2] -->|20 bands × 1s| D[Raw HXR Counts]
         E[SoLEXS PI] -->|86400×340 spectra| F[PI Spectra]
         G[HEL1OS HK] -->|62 columns| H[Housekeeping]
         I[GOES XRS-A/B] -->|netCDF| J[GOES Flux]
     end
 
-    subgraph Data Cleaning
-        B -->|Deadtime correction| K[Corrected Counts]
-        D -->|Background subtraction| L[Background-subtracted HXR]
-        F -->|Channel energies| M[Energy-calibrated PI]
+    subgraph "🔧 Data Correction"
+        B -->|Deadtime τ=13.65µs| K[Corrected SXR]
+        D -->|BG subtraction CZT=70cps| L[BKGD-sub HXR]
+        F -->|Channel energies| M[Calibrated PI]
         K -->|GTI masking| N[Clean SXR]
-        L -->|Align to SoLEXS grid| O[Aligned HXR]
+        L -->|Align to SoLEXS grid| O[Aligned HXR 86400×20]
     end
 
-    subgraph Feature Extraction
-        N -->|GPU batch| P[SXR Stats + ACF + Spectral Entropy]
-        O -->|GPU batch| Q[HXR Band Features]
-        M -->|GPU batch| R[PI Channel Features]
-        N|->|Derivatives| S[dSXR/dt + d²SXR/dt²]
-        O|->|Multi-scale| T[5min/15min/30min Stats]
-        O|->|Neupert| U[Neupert Correlation]
-        P --> V[GPU Feature Matrix]
-        Q --> V
-        R --> V
-        S --> V
-        T --> V
-        U --> V
+    subgraph "🚀 GPU Batch Features (A100)"
+        N -->|unfold 3600s windows| P[SXR Windows 277×3600]
+        O -->|unfold 3600s windows| Q[HXR Windows 277×3600×20]
+        P -->|_batch_stats"| R[SXR Stats 15]
+        P -->|_batch_acf| S[ACF 4]
+        P -->|_batch_spectral_entropy| T[Spectral Entropy 2]
+        P -->|_batch_derivative_features| U[Derivatives 12]
+        P -->|_batch_multiscale| V[Multiscale 24]
+        P -->|_batch_neupert| W[Neupert 2]
+        Q -->|_batch_hxr_features| X[HXR Bands 35]
+        Q -->|_batch_pi_spectral_features| Y[Cross-detector 6]
     end
 
-    subgraph CPU Features
-        F -->|Temperature fit| W[T, EM, χ²]
-        H -->|HK stats| X[Detector temps, HV]
-        D -->|Spectral fit| Y[γ spectral index]
-        D -->|Non-thermal fit| Z[γ, Ec, N_nth]
-        I -->|GOES flux| AA[GOES XRS-B/A]
-        D -->|Granger causality| AB[HXR→SXR causality]
-        D -->|Mediation| AC[Causal mediation]
-        D -->|Info theory| AD[TE, MI, SampEn]
-        D -->|QPP detection| AE[QPP period, amplitude]
+    subgraph "🧠 CPU Day-Level Features"
+        M -->|fit_temperature| Z[T, EM, χ² 3]
+        L -->|fit_spectral_index| AA[Spectral Index γ 4]
+        L -->|fit_combined_spectrum| AB[Non-thermal γ,Ec,N_nth 4]
+        H -->|HK stats| AC[Detector Temps, HV 8]
+        J -->|GOES flux| AD[GOES XRS-B/A 3]
+        L -->|granger_causality_simple| AE[Granger 2]
+        L -->|mediation_analysis| AF[Mediation 1]
+        L -->|detect_qpp_during_flares| AG[QPP 4]
+        L -->|information_theory| AH[TE, MI, SampEn 6]
+        J -->|extract_goes_timeseries_features| AI[GOES TS 8]
+        M -->|extract_per_window_spectral| AJ[Window Spectral 8]
+        L -->|extract_wavelet_scalogram_features| AK[Wavelet 10]
     end
 
-    subgraph Model Training
-        V --> AF[Feature Matrix: 200K×179]
-        W --> AF
-        X --> AF
-        Y --> AF
-        Z --> AF
-        AA --> AF
-        AB --> AF
-        AC --> AF
-        AD --> AF
-        AE --> AF
-        AF -->|CatBoost GPU| AG[GBDT Model]
-        AF -->|CNN-LSTM| AH[Sequence Model]
-        AF -->|Transformer| AI[Spectral-Temporal Model]
-        AG --> AJ[Ensemble]
-        AH --> AJ
-        AI --> AJ
+    subgraph "📊 Feature Matrix"
+        R --> AL[179 Features]
+        S --> AL
+        T --> AL
+        U --> AL
+        V --> AL
+        W --> AL
+        X --> AL
+        Y --> AL
+        Z --> AL
+        AA --> AL
+        AB --> AL
+        AC --> AL
+        AD --> AL
+        AE --> AL
+        AF --> AL
+        AG --> AL
+        AH --> AL
+        AI --> AL
+        AJ --> AL
+        AK --> AL
     end
 
-    subgraph Output
-        AJ -->|TSS, HSS, AUC| AK[Performance Metrics]
-        AJ -->|Flare detection| AL[Nowcast Catalogue]
-        AJ -->|Probability| AM[Forecast Results]
+    subgraph "🤖 Model Training"
+        AL -->|StandardScaler| AM[Scaled Features]
+        AM -->|CatBoost GPU| AN[GBDT TSS=0.412]
+        AM -->|XGBoost| AO[XGBoost TSS=0.371]
+        AM -->|LightGBM| AP[LightGBM TSS=0.331]
+        AM -->|CNN-LSTM| AQ[LSTM TSS=0.341]
+    end
+
+    subgraph "📁 Output"
+        AN --> AR[Forecast Results]
+        AO --> AR
+        AP --> AR
+        AQ --> AR
+        AL -->|save_csv"| AS[Master CSV 277×277]
+        AS -->|interpretation.py"| AT[Interpretation JSON]
     end
 ```
 
 ---
 
-## Data Processing Flow
+## Data Flow
 
 ```mermaid
 flowchart LR
-    subgraph Raw Data
-        A[SoLEXS LC: 86400×1] 
-        B[HEL1OS 4×LC: 86400×20]
-        C[SoLEXS PI: 86400×340]
-        D[GOES XRS: 86400×2]
+    subgraph Input
+        A[SoLEXS FITS] -->|.lc| B[SXR Counts 86400]
+        A -->|.pi| C[PI Spectra 86400×340]
+        D[HEL1OS FITS] -->|lightcurve| E[HXR Bands 86400×20]
+        D -->|hk.fits| F[HK Data 62 cols]
+        G[GOES NC] -->|XRS-B/A| H[Flux 86400×2]
     end
 
-    subgraph Corrections
-        A -->|Deadtime| A1[Corrected SXR]
-        B -->|Background| B1[Subtracted HXR]
-        C -->|Energy cal| C1[Calibrated PI]
-        D -->|Interpolation| D1[Interpolated GOES]
+    subgraph Pipeline
+        B --> I((generate_master_csv.py))
+        C --> I
+        E --> I
+        F --> I
+        H --> I
+        I --> J[CSV 277×277]
+        I --> K[Interpretation JSON]
     end
 
-    subgraph GPU Processing
-        A1 -->|unfold| G1[SXR Windows: 277×3600]
-        B1 -->|unfold| G2[HXR Windows: 277×3600×20]
-        C1 -->|window sum| G3[PI Windows: 277×340]
-        D1 -->|interpolate| G4[GOES Windows]
+    subgraph Output
+        J --> L[179 GPU Features]
+        J --> M[80 CPU Features]
+        J --> N[18 Metadata]
+        K --> O[15 Analysis Sections]
+        K --> P[19 Feature Groups]
     end
-
-    subgraph Feature Computation
-        G1 -->|GPU batch| F1[Stats + ACF + Entropy]
-        G2 -->|GPU batch| F2[Bands + Hardness]
-        G3 -->|GPU batch| F3[PI Channels]
-        G4 -->|CPU| F4[GOES Stats]
-        F1 --> M[Feature Matrix: 179]
-        F2 --> M
-        F3 --> M
-        F4 --> M
-    end
-
-    M -->|StandardScaler| S[Scaled Features]
-    S -->|CatBoost| T[Trained Model]
-    T -->|predict_proba| R[Flare Probability]
 ```
 
 ---
 
-## Flare Classification System
+## Feature Extraction Architecture
 
 ```mermaid
-flowchart TD
-    A[SoLEXS SXR Peak] -->|Peak Flux| B{Intensity Check}
-    B -->|> 10,000 cts/s| C[X-equiv]
-    B -->|1,000–10,000| D[M-equiv]
-    B -->|100–1,000| E[C-equiv]
-    B -->|< 100| F[B-equiv]
+graph TD
+    subgraph "GPU Batch (A100 80GB)"
+        A[277 Windows × 3600s] -->|torch to CUDA| B[GPU Tensor]
+        B --> C{8 Batch Functions}
+        C --> D[_batch_stats: 15 feats]
+        C --> E[_batch_acf: 4 feats]
+        C --> F[_batch_spectral_entropy: 2 feats]
+        C --> G[_batch_derivative_features: 12 feats]
+        C --> H[_batch_multiscale: 24 feats]
+        C --> I[_batch_neupert: 2 feats]
+        C --> J[_batch_hxr_features: 35 feats]
+        C --> K[_batch_pi_spectral_features: 6 feats]
+        D --> L[133 GPU Features in 1.1s]
+        E --> L
+        F --> L
+        G --> L
+        H --> L
+        I --> L
+        J --> L
+        K --> L
+    end
 
-    C --> G{HEL1OS HXR Check}
-    D --> G
-    E --> G
-    F --> G
+    subgraph "CPU Day-Level"
+        M[Full-day Data] --> N{16 Computations}
+        N --> O[T, EM, χ² from PI]
+        N --> P[Spectral Index γ×4 detectors]
+        N --> Q[Non-thermal fit]
+        N --> R[HK stats ×8]
+        N --> S[GOES flux ×3]
+        N --> T[Granger causality]
+        N --> U[Mediation analysis]
+        N --> V[QPP detection]
+        N --> W[Info theory ×6]
+        N --> X[GOES time-series ×8]
+        N --> Y[Per-window spectral ×8]
+        N --> Z[Wavelet scalogram ×10]
+        O --> AA[46 CPU Features in 4s]
+        P --> AA
+        Q --> AA
+        R --> AA
+        S --> AA
+        T --> AA
+        U --> AA
+        V --> AA
+        W --> AA
+        X --> AA
+        Y --> AA
+        Z --> AA
+    end
 
-    G -->|HXR > 10 cts/s within ±60s| H[Confirmed]
-    G -->|No HXR| I[Uncertain]
-
-    H --> J{Combined Classification}
-    I --> J
-
-    J -->|X-equiv + HXR| K[CLASS X]
-    J -->|M-equiv + HXR| L[CLASS M]
-    J -->|C-equiv + HXR| M[CLASS C]
-    J -->|X-equiv + no HXR| N[X-uncertain]
-    J -->|M-equiv + no HXR| O[M-uncertain]
-    J -->|C-equiv + no HXR| P[C-uncertain]
-
-    K --> Q[GOES Validation]
-    L --> Q
-    M --> Q
+    L --> AB[179 Total Features]
+    AA --> AB
+    AB --> AC[Master CSV 277×277]
+    AC --> AD[Interpretation JSON]
 ```
 
 ---
 
-## Architecture Overview
+## Interpretation Pipeline
 
 ```mermaid
-classDiagram
-    class SoLEXS {
-        +load_lc() ndarray
-        +load_pi() ndarray
-        +load_gti() ndarray
-        +correct_deadtime() ndarray
-    }
-
-    class HEL1OS {
-        +load_lc() ndarray
-        +load_spectra() ndarray
-        +load_hk() dict
-        +subtract_background() ndarray
-    }
-
-    class FeatureEngine {
-        +batch_stats() dict
-        +batch_acf() dict
-        +batch_derivatives() dict
-        +batch_multiscale() dict
-        +batch_neupert() dict
-        +batch_hxr_features() dict
-        +batch_pi_features() dict
-    }
-
-    class AdaptiveDetector {
-        +adaptive_threshold() float
-        +detect_flares() list
-        +classify_solexs_helios() list
-    }
-
-    class Models {
-        +CatBoost TSS=0.412
-        +CNN-LSTM v3 3.0M params
-        +Transformer 3.7M params
-        +Ensemble stacking
-    }
-
-    SoLEXS --> FeatureEngine : raw counts
-    HEL1OS --> FeatureEngine : HXR bands
-    FeatureEngine --> AdaptiveDetector : features
-    AdaptiveDetector --> Models : flare labels
-    Models --> |TSS, AUC| Results
+graph LR
+    A[Master CSV] --> B{interpretation.py}
+    B --> C[Flare Catalog<br/>timing + class + HXR]
+    B --> D[Neupert Effect<br/>r = corr(SXR,∫HXR)]
+    B --> E[Cross-Correlation<br/>HXR vs SXR lag]
+    B --> F[Power Spectrum<br/>Lomb-Scargle periods]
+    B --> G[QPP Analysis<br/>wavelet + LS]
+    B --> H[Spectral Evolution<br/>hardness ratio]
+    B --> I[Causal Network<br/>Granger + mediation]
+    B --> J[Feature Groups<br/>19 groups × per-group analysis]
+    C --> K[Interpretation JSON]
+    D --> K
+    E --> K
+    F --> K
+    G --> K
+    H --> K
+    I --> K
+    J --> K
 ```
 
 ---
 
-## Results Summary
+## Project Structure
 
-### Model Performance (v3)
-
-| Model | TSS | HSS | AUC-ROC | F1 | Train Time |
-|-------|-----|-----|---------|----|------------|
-| CatBoost (GPU) | **0.412** | 0.110 | 0.795 | 0.160 | 40s |
-| XGBoost (CPU) | 0.371 | 0.085 | 0.783 | 0.138 | 108s |
-| LightGBM (CPU) | 0.331 | 0.067 | 0.736 | 0.122 | 7s |
-
-### Adaptive Detection (May 5, 2024)
-
-| Metric | Value |
-|--------|-------|
-| Flares detected | 9 |
-| X-class | 2 (matches GOES) |
-| HXR confirmation | 8/9 (89%) |
-| False positives | 0 |
-| Spectral index γ | 0.72 |
-
-### Data Coverage
-
-| Dataset | Days | Cadence | Features |
-|---------|------|---------|----------|
-| SoLEXS SDD2 | 747 | 1s | LC + PI (340ch) |
-| HEL1OS 4×LC | 927 | 1s | 20 bands |
-| HEL1OS spectra | 927 | 20s | 341-511 channels |
-| Combined | 724 | 1s | 179 features |
+```
+isro-bah-iiserk/
+├── AGENTS.md                    # Problem statement + implementation state
+├── README.md                    # This file
+├── docs/
+│   ├── PLAN.md                  # Research plan + mathematical framework
+│   ├── RESULTS.md               # Analysis results
+│   └── analysis/                # Data exploration notes
+├── src/bah2026/
+│   ├── config.py                # Paths, constants, parameters
+│   ├── main.py                  # CLI + pipeline orchestration
+│   ├── data/
+│   │   ├── reader.py            # FITS data loaders
+│   │   ├── corrections.py       # Deadtime, background subtraction
+│   │   ├── preprocessing.py     # Alignment, GTI masking
+│   │   ├── calibration.py       # SoLEXS→GOES conversion
+│   │   ├── ground_truth.py      # GOES catalog validation
+│   │   └── sequence_builder.py  # DL sequence preparation
+│   ├── features/
+│   │   ├── engineering.py       # 179 canonical feature definitions
+│   │   ├── gpu_features.py      # GPU batch functions (A100)
+│   │   ├── advanced_features.py # GOES TS, wavelet, per-window spectral
+│   │   ├── spectral_fitting.py  # Temperature, spectral index, Neupert
+│   │   ├── non_thermal.py       # Thick-target bremsstrahlung fitting
+│   │   ├── causal_network.py    # Granger causality, mediation
+│   │   ├── information_theory.py # Transfer entropy, mutual info
+│   │   ├── qpp.py               # QPP detection (wavelet + LS)
+│   │   └── interpretation.py    # Physical interpretation pipeline
+│   ├── models/
+│   │   ├── nowcasting.py        # SWPC flare detection
+│   │   ├── adaptive_detection.py # Adaptive threshold detection
+│   │   ├── forecasting.py       # CatBoost, XGBoost, LightGBM
+│   │   ├── cnn_lstm_v3.py       # 3.0M param deep learning
+│   │   ├── transformer.py       # 3.7M param transformer
+│   │   └── mae_pretrain.py      # 5.6M param masked autoencoder
+│   ├── scripts/
+│   │   └── generate_master_csv.py # Single-day analysis pipeline
+│   └── visualization/
+├── scripts/
+│   └── run_all.py               # Batch runner for all 724 days
+├── tests/                       # 120+ pytest tests
+└── output/
+    ├── master_csv/              # Generated CSVs + interpretations
+    ├── models/                  # Trained model checkpoints
+    └── hdf5/                    # Feature matrices
+```
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install
-uv sync
+# Single day analysis (GPU-accelerated)
+.venv/bin/python3 src/bah2026/scripts/generate_master_csv.py 2024-05-05
 
-# Run full pipeline
-bah2026 all
-
-# Run nowcast only
-bah2026 nowcast
-
-# Run forecast only
-bah2026 forecast
-
-# GPU feature extraction
-python src/bah2026/scripts/gpu_extract_sequential.py
+# Output:
+#   output/master_csv/master_May_5_2024.csv
+#   output/master_csv/master_May_5_2024_interpretation.json
 
 # Run tests
-pytest tests/ -v
+PYTHONPATH=src .venv/bin/python3 -m pytest tests/ -v
+
+# Train forecasting model
+PYTHONPATH=src .venv/bin/python3 -c "from bah2026.main import cmd_train; cmd_train()"
 ```
 
----
+## Key Results
 
-## Repository Structure
-
-```
-src/bah2026/
-├── config.py                    # All parameters
-├── main.py                      # CLI entry point
-├── data/
-│   ├── reader.py                # FITS readers (SoLEXS + HEL1OS)
-│   ├── corrections.py           # Deadtime, background, spurious
-│   ├── calibration.py           # SoLEXS→GOES calibration
-│   ├── preprocessing.py         # GTI masking, alignment
-│   └── sequence_builder.py      # 12-channel sequence data
-├── features/
-│   ├── engineering.py           # 117 canonical features
-│   ├── advanced_features.py     # 62 advanced features (GPU)
-│   ├── gpu_features.py          # GPU batch extraction (A100)
-│   ├── information_theory.py    # TE, MI, SampEn
-│   ├── spectral_fitting.py      # T, EM, γ, Neupert
-│   ├── non_thermal.py           # Thick-target model
-│   ├── qpp.py                   # QPP detection
-│   ├── causal_network.py        # Granger, mediation
-│   └── response_convolution.py  # RMF/ARF deconvolution
-├── models/
-│   ├── nowcasting.py            # SWPC-style detection
-│   ├── adaptive_detection.py    # Adaptive threshold + classification
-│   ├── forecasting.py           # LightGBM, XGBoost, CatBoost, CNN-LSTM
-│   ├── cnn_lstm_v3.py           # Improved CNN-LSTM (3.0M params)
-│   ├── transformer.py           # Spectral-Temporal Transformer (3.7M)
-│   └── mae_pretrain.py          # Self-supervised MAE pretraining
-├── scripts/
-│   ├── run_full_pipeline.py     # v2 pipeline runner
-│   ├── gpu_extract_sequential.py # GPU feature extraction
-│   └── build_sequences.py       # Sequence data builder
-└── visualization/
-    ├── dashboard.py             # Streamlit real-time monitor
-    └── plots.py                 # Publication-quality plots
-```
-
----
-
-## Version History
-
-| Version | Date | Key Changes | TSS |
-|---------|------|-------------|-----|
-| v0 | Jun 2026 | Baseline: 42 features, GOES calibration | 0.149 |
-| v1 | Jun 2026 | Corrected labels, 70 features | 0.347 |
-| v2 | Jun 2026 | 117 features, all data sources | 0.412 |
-| v3 | Jul 2026 | GPU acceleration, 179 features, ensemble | **0.412** |
-
----
-
-## License
-
-Academic project for Bharatiya Antariksh Hackathon 2026.
+| Metric | Value |
+|--------|-------|
+| Detection (X-class) | X6.3 flare on 2024-05-05 |
+| False positives | 0 |
+| CatBoost TSS | 0.412 |
+| CatBoost AUC | 0.795 |
+| Neupert correlation r | 0.877 (integral form) |
+| Feature coverage | 179/179 (100%) |
+| Pipeline runtime/day | ~10s |
