@@ -713,12 +713,23 @@ def _process_day_features(
 
 def _process_day_features_gpu(
     args: tuple[date, list[float]],
+    save_csv: bool = False,
+    csv_out_dir: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """GPU-accelerated single-day feature extraction.
 
     Uses GPU batch for sliding window features (~277 windows in parallel)
     plus CPU day-level features. Significantly faster than the CPU-only
     _process_day_features (~10s vs ~120s per day).
+
+    Parameters
+    ----------
+    args : tuple
+        (date, event_times_list)
+    save_csv : bool
+        If True, also save master CSV + interpretation for this day.
+    csv_out_dir : str, optional
+        Directory for CSV output. Defaults to output/master_csv/.
 
     Mirrors the approach in generate_master_csv.py but returns feature
     matrices instead of saving CSV.
@@ -1001,6 +1012,140 @@ def _process_day_features_gpu(
             y[wi] = (
                 1 if any(0 < et - t <= FORECAST_WINDOW for et in day_event_times) else 0
             )
+
+    # ── Optional: save master CSV + interpretation ──────────────────────
+    if save_csv:
+        try:
+            from datetime import datetime, timedelta
+            from bah2026.models.adaptive_detection import (
+                detect_flares_adaptive,
+                classify_solexs_helios,
+            )
+
+            out_dir = Path(csv_out_dir or "output/master_csv")
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            # UTC times
+            mjd_all = sxr["mjdrefi"] + sxr["mjdreff"] + time_s / 86400.0
+            utc0 = datetime(1858, 11, 17)
+            utc_times = np.array([utc0 + timedelta(days=float(m)) for m in mjd_all])
+
+            # Flare detection
+            flr = detect_flares_adaptive(
+                counts, time_s, min_duration=60, min_peak=100, sigma=3.0
+            )
+            hxr_czt1_fb = hxr4[:, 4]
+            hxr_cdte1_fb = hxr4[:, 14] if hxr4.shape[1] > 14 else np.zeros_like(counts)
+            flr = classify_solexs_helios(flr, hxr_czt1_fb, hxr_cdte1_fb, time_s)
+
+            # Build CSV dataframe
+            canonical_fnames = get_canonical_feature_names()
+            records = []
+            for wi in range(n_w):
+                row_dict = {
+                    "window_id": wi,
+                    "date": str(d),
+                    "time_utc": utc_times[
+                        min(wi * STEP + LOOKBACK, len(utc_times) - 1)
+                    ].strftime("%H:%M:%S"),
+                    "in_flare": 0,
+                    "flare_class": "none",
+                }
+                # GPU features
+                for fi, fn in enumerate(canonical_fnames):
+                    row_dict[f"gpu_{fn}"] = float(X[wi, fi])
+                # CPU features
+                for k, v in pre.items():
+                    row_dict[f"cpu_{k}"] = float(v) if np.isfinite(v) else 0.0
+                # Flare label
+                t_win = time_s[min(wi * STEP + LOOKBACK, len(time_s) - 1)]
+                for f in flr:
+                    if f["start_idx"] <= int(t_win) <= f["end_idx"]:
+                        row_dict["in_flare"] = 1
+                        row_dict["flare_class"] = f.get("combined_class", "none")
+                        break
+                records.append(row_dict)
+
+            df = pd.DataFrame(records)
+            csv_name = f"master_{d.strftime('%b_%d_%Y')}.csv"
+            csv_path = out_dir / csv_name
+            df.to_csv(csv_path, index=False)
+
+            # Build and save interpretation
+            try:
+                from bah2026.features.interpretation import (
+                    build_physical_interpretation,
+                    save_interpretation,
+                )
+
+                # QPP result (use aliased import to avoid shadowing module-level detect_qpp)
+                hxr_qpp = hxr4[:, 4][np.isfinite(hxr4[:, 4])]
+                qpp_res = {
+                    "detected": 0,
+                    "period": 0.0,
+                    "amplitude": 0.0,
+                    "significance": 0.0,
+                    "ls_periods": [],
+                    "periods": [],
+                }
+                if len(hxr_qpp) > 100:
+                    from bah2026.features.qpp import detect_qpp as _dqpp
+
+                    qq = _dqpp(hxr_qpp, dt=1.0, min_period=10, max_period=300)
+                    qpp_res = qq
+
+                # Granger result
+                gc_res = {"improvement": 0.0, "best_lag": 0}
+                ds_gc = 10
+                sxr_gc = counts[::ds_gc]
+                hxr_gc = hxr4[::ds_gc, 4]
+                vgc = np.isfinite(sxr_gc) & np.isfinite(hxr_gc)
+                if vgc.sum() > 100:
+                    dsxr_gc = np.diff(sxr_gc[vgc])
+                    hxr_gc_v = hxr_gc[vgc][1:]
+                    gc_res = granger_causality_simple(
+                        hxr_gc_v.astype(np.float32),
+                        dsxr_gc.astype(np.float32),
+                        max_lag=30,
+                        n_splits=3,
+                    )
+
+                n_gpu_f = len([c for c in df.columns if c.startswith("gpu_")])
+                n_cpu_f = len([c for c in df.columns if c.startswith("cpu_")])
+                n_zero = sum(
+                    (df[c] == 0.0).all() for c in df.columns if c.startswith("gpu_")
+                )
+
+                interp = build_physical_interpretation(
+                    target_date=d,
+                    counts=counts,
+                    hxr_fb=hxr4[:, 4],
+                    hxr_bands=hxr4[:, :5],
+                    hxr_cdte1=hxr4[:, 14]
+                    if hxr4.shape[1] > 14
+                    else np.zeros_like(counts),
+                    time_s=time_s,
+                    sxr_headers={"mjdrefi": sxr["mjdrefi"], "mjdreff": sxr["mjdreff"]},
+                    gti=gti,
+                    goes_xrsb_arr=None,
+                    goes_xrsa_arr=None,
+                    flares=flr,
+                    qpp_result=qpp_res,
+                    gc_result=gc_res,
+                    feature_values={},
+                    df_columns=int(len(df.columns)),
+                    n_gpu_features=n_gpu_f,
+                    n_cpu_features=n_cpu_f,
+                    n_nonzero=n_gpu_f - n_zero,
+                    runtime_sec=0.0,
+                )
+                interp["csv_file"] = csv_name
+                save_interpretation(interp, csv_path)
+            except Exception:
+                pass
+            print(f"  Saved: {csv_path.name} ({len(df)} rows)", flush=True)
+        except Exception as e:
+            print(f"  CSV save skipped for {d}: {e}", flush=True)
 
     return X, y
 
@@ -1370,8 +1515,50 @@ def cmd_train() -> dict:
     events_df.to_csv(CATALOGS_DIR / "nowcast_catalogue.csv", index=False)
     print(f"  Nowcast: {len(all_events)} events in {time.time() - t0:.1f}s")
 
-    # Phase 2: Features (sequential)
-    X, y, fnames = cmd_features(days, events_df, sequential=True)
+    # Phase 2: GPU Features + CSV/Interpretation (parallel across CPUs)
+    print("\n── Phase 2: GPU Features + CSV/Interpretation ──")
+    n_parallel = min(12, N_WORKERS, len(days))  # 12 workers max for GPU stability
+    print(f"  Processing {len(days)} days with {n_parallel} parallel workers...")
+    all_X, all_y = [], []
+    from bah2026.features.engineering import get_canonical_feature_names
+    from functools import partial
+
+    t1 = time.time()
+    work_items = [(d, event_times.get(str(d), [])) for d in days]
+    worker_fn = partial(_process_day_features_gpu, save_csv=True)
+
+    with Pool(n_parallel) as pool:
+        results = list(
+            tqdm(
+                pool.imap(worker_fn, work_items, chunksize=4),
+                total=len(work_items),
+                desc="Featurizing",
+            )
+        )
+
+    for Xd, yd in results:
+        if Xd.size > 0:
+            all_X.append(Xd)
+            all_y.append(yd)
+
+    if not all_X:
+        print("  No features extracted!")
+        return {}
+
+    X = np.vstack(all_X)
+    y = np.concatenate(all_y)
+    fnames = get_canonical_feature_names()
+    zc = (X == 0).all(axis=0).sum()
+    print(
+        f"  X={X.shape}, y={y.sum()}/{len(y)} pos ({100 * y.mean():.2f}%), zero_cols={zc}/{X.shape[1]}"
+    )
+    print(f"  Features + CSV: {time.time() - t1:.1f}s")
+
+    # Save features
+    np.save(HDF5_DIR / "X_features.npy", X)
+    np.save(HDF5_DIR / "y_labels.npy", y)
+    with open(HDF5_DIR / "feature_names.json", "w") as fp:
+        json.dump(fnames, fp)
 
     # Phase 3: Forecast
     results = cmd_forecast(X, y, fnames)
