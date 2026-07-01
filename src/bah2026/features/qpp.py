@@ -377,6 +377,15 @@ def detect_qpp(
     ls_peaks, ls_props = find_peaks(ls_power, height=ls_height_threshold)
     ls_periods = 1.0 / ls_freqs[ls_peaks] if len(ls_peaks) > 0 else np.array([])
 
+    # If no peaks found but max LS power exceeds threshold, use global max
+    # (helps when the peak is at the boundary of the search range)
+    if len(ls_peaks) == 0 and len(ls_power) > 0:
+        max_ls_idx = np.argmax(ls_power)
+        if ls_power[max_ls_idx] > ls_height_threshold:
+            ls_peaks = np.array([max_ls_idx])
+            ls_props = {"peak_heights": np.array([ls_power[max_ls_idx]])}
+            ls_periods = np.array([1.0 / ls_freqs[max_ls_idx]])
+
     # ── Wavelet (FFT-based, auto CPU/GPU) ──
     power_wv, scales, periods_wv = wavelet_power_auto(
         detrended, dt=dt, s_min=min_period / 4, s_max=max_period
@@ -416,7 +425,7 @@ def detect_qpp(
             peak_positions = np.where(ls_peaks == closest_peak_idx)[0]
             if len(peak_positions) > 0:
                 ls_ht = ls_props["peak_heights"][peak_positions[0]]
-                if ls_ht > significance * 0.5:  # Strong LS-only detection
+                if ls_ht > significance * 0.3:  # LS-only detection for ML features
                     confirmed_periods.append(float(lp))
 
     # Deduplicate (within 10%)
