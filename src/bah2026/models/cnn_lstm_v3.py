@@ -286,7 +286,7 @@ class FlareForecasterCNNLSTMv3:
         )
         self.use_amp = self.device.type == "cuda"
         self.scaler = (
-            torch.amp.GradScaler("cuda", enabled=False) if self.use_amp else None
+            torch.amp.GradScaler("cuda", enabled=True) if self.use_amp else None
         )
         self.history: dict | None = None
 

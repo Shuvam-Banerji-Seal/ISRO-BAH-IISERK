@@ -202,16 +202,17 @@ def test_feature_coverage_baseline():
                 print(f"    - {fn}")
     print(f"{'=' * 60}\n")
 
-    # After Phase 1 fixes, we expect ~21 zero features (11 GOES data unavailable,
-    # 7 quiet-day dependent, 1 nonthermal_fraction_window, 1 sxr_chi2_red)
-    assert report["n_zero"] <= 30, (
+    # After all fixes, we expect ~6 zero features:
+    # - 5 unphysical spectral indices (gamma < 1.5, correctly rejected)
+    # - 1 qpp_detected (boundary-excluded, correctly False)
+    assert report["n_zero"] <= 10, (
         f"Too many zero features: {report['n_zero']}. "
-        "Expected <= 30 after Phase 1 fixes (11 GOES + 7 quiet-day + 2 minor)."
+        "Expected <= 10 (5 unphysical gamma + 1 QPP + ~4 expected)."
     )
-    # Assert 88%+ non-zero
-    assert report["pct_nonzero"] >= 85.0, (
+    # Assert 95%+ non-zero
+    assert report["pct_nonzero"] >= 95.0, (
         f"Non-zero feature coverage too low: {report['pct_nonzero']:.1f}%. "
-        "Expected >= 85% after Phase 1 fixes."
+        "Expected >= 95% after all fixes."
     )
 
 
