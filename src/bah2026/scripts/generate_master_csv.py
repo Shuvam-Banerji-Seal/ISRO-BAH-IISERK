@@ -163,6 +163,9 @@ for idx, key in enumerate(["czt1", "czt2", "cdte1", "cdte2"]):
             np.float32
         )
 
+# Replace any remaining NaN from HXR alignment gaps
+hxr4_combined = np.nan_to_num(hxr4_combined, nan=0.0)
+
 sxr_np = np.zeros((n_w, lookback), dtype=np.float32)
 hxr_np = np.zeros((n_w, lookback, 20), dtype=np.float32)
 pi_win = np.zeros((n_w, 340), dtype=np.float32)
