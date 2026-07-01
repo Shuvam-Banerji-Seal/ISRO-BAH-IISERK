@@ -600,92 +600,94 @@ df.to_csv(csv_path, index=False)
 print(f"  Saved: {len(df)} rows × {len(df.columns)} columns", flush=True)
 
 # ═══════════════════════════════════════════════════════════
-# 6. INTERPRETATION
+# 6. INTERPRETATION PIPELINE
 # ═══════════════════════════════════════════════════════════
 print("Saving interpretations...", flush=True)
-n_x = int((df["flare_class"] == "X").sum())
-n_m = int((df["flare_class"] == "M").sum())
-n_c = int((df["flare_class"] == "C").sum())
 
-# Grab key scalar physical values from gpu features
-phys = {}
-for col in df.columns:
-    if col.startswith("gpu_") and col != "gpu_window_len":
-        u = df[col].dropna().unique()
-        if len(u) <= 3:
-            phys[col.replace("gpu_", "")] = float(u[0]) if len(u) > 0 else 0.0
+from bah2026.features.interpretation import (
+    build_physical_interpretation,
+    save_interpretation,
+)
 
-interpretation = {
-    "date": str(TARGET_DATE),
-    "csv_file": CSV_FILENAME,
-    "description": f"Full analysis of Aditya-L1 SoLEXS + HEL1OS data for {TARGET_DATE}.",
-    "processing": {
-        "pipeline": "generate_master_csv.py v3",
-        "n_windows": int(len(df)),
-        "n_columns": int(len(df.columns)),
-        "n_gpu_features": int(len([c for c in df.columns if c.startswith("gpu_")])),
-        "n_cpu_features": int(len([c for c in df.columns if c.startswith("cpu_")])),
-        "feature_coverage_pct": round(
-            100
-            * (
-                1
-                - sum((df[c] == 0.0).all() for c in df.columns if c.startswith("gpu_"))
-                / max(len([c for c in df.columns if c.startswith("gpu_")]), 1)
-            ),
-            1,
-        ),
-        "runtime_sec": round(time.time() - t_total, 1),
-    },
-    "flare_detection": {
-        "n_flares_detected": 9,
-        "n_flare_windows": int(df["in_flare"].sum()),
-        "classification": {
-            "X_windows": n_x,
-            "M_windows": n_m,
-            "C_windows": n_c,
-            "non_flare_windows": int((df["flare_class"] == "none").sum()),
-        },
-    },
-    "key_physical_parameters": {
-        "sxr_temperature_mk": round(phys.get("sxr_temperature_mk", 0), 1),
-        "sxr_emission_measure": f"{phys.get('sxr_emission_measure', 0):.1e}",
-        "hxr_spectral_index_gamma": round(phys.get("hxr_spectral_index_gamma", 0), 2),
-        "nonthermal_gamma": round(phys.get("nonthermal_gamma", 0), 2),
-        "nonthermal_ec_kev": round(phys.get("nonthermal_ec", 0), 1),
-        "thermal_fraction": round(phys.get("thermal_fraction", 0), 2),
-        "nonthermal_fraction_window": round(
-            phys.get("nonthermal_fraction_window", 0), 2
-        ),
-        "goes_xrsb_flux_wm2": f"{phys.get('goes_xrsb_flux', 0):.2e}",
-        "goes_xrsa_flux_wm2": f"{phys.get('goes_xrsa_flux', 0):.2e}",
-        "neupert_granger_improvement": round(
-            phys.get("neupert_granger_improvement", 0), 4
-        ),
-        "neupert_rho_mean": round(phys.get("neupert_rho_mean", 0), 4),
-        "qpp_detected": bool(phys.get("qpp_detected", 0)),
-        "qpp_period_sec": round(phys.get("qpp_period", 0), 1),
-        "max_sxr_count_rate": round(float(df["day_sxr_peak"].max()), 1),
-        "max_hxr_czt1_rate": round(float(df["hxr_czt1_full"].max()), 1),
-        "mean_neupert_rho": round(float(df["gpu_neupert_rho_mean"].mean()), 4),
-    },
-    "interpretation_notes": [
-        f"SXR temperature {phys.get('sxr_temperature_mk', 0):.1f} MK from thermal bremsstrahlung fit to SoLEXS PI spectrum.",
-        f"Non-thermal spectral index gamma={phys.get('hxr_spectral_index_gamma', 0):.2f} in CZT band indicates electron acceleration.",
-        f"Neupert correlation shows Granger improvement of {phys.get('neupert_granger_improvement', 0) * 100:.1f}%, confirming Neupert-effect energy release.",
-        f"QPP candidate detected at ~{phys.get('qpp_period', 0):.0f}s period — possible oscillatory reconnection.",
-        f"GOES XRS-B flux matches flare classification.",
-        f"{n_x} X-class, {n_m} M-class, {n_c} C-class flare windows detected.",
-        f"Feature coverage: 179/179 features non-zero (100%).",
-    ],
+# Gather feature values from the first flare and quiet windows
+feature_values = {}
+for c in df.columns:
+    if c.startswith("gpu_") or c.startswith("cpu_"):
+        # Use the window with the highest SXR as representative flare window
+        flare_rows = df[df["in_flare"] == 1]
+        if len(flare_rows) > 0:
+            best = flare_rows.loc[flare_rows["sxr_peak_window"].idxmax()]
+        else:
+            best = df.iloc[len(df) // 2]
+        feature_values[c] = float(best[c]) if c in best else 0.0
+
+# Compute Granger causality for the interpretation
+import warnings as _warn
+
+_warn.filterwarnings("ignore", category=RuntimeWarning)
+ds_gc = 10
+sxr_gc = counts[::ds_gc]
+hxr_gc = hxr4_combined[::ds_gc, 4]
+valid_gc = np.isfinite(sxr_gc) & np.isfinite(hxr_gc)
+if valid_gc.sum() > 100:
+    dsxr_gc = np.diff(sxr_gc[valid_gc])
+    hxr_gc_v = hxr_gc[valid_gc][1:]
+    from bah2026.features.causal_network import granger_causality_simple as _gc
+
+    gc_result = _gc(
+        hxr_gc_v.astype(np.float32), dsxr_gc.astype(np.float32), max_lag=30, n_splits=3
+    )
+else:
+    gc_result = {"improvement": 0.0, "best_lag": 0}
+
+# Build QPP result dict from pre
+qpp_result = {
+    "detected": pre.get("qpp_detected", 0),
+    "period": pre.get("qpp_period", 0),
+    "amplitude": pre.get("qpp_amplitude", 0),
+    "significance": pre.get("qpp_significance", 0),
+    "ls_periods": [pre.get("qpp_period", 0)] if pre.get("qpp_detected", 0) else [],
+    "periods": [pre.get("qpp_period", 0)] if pre.get("qpp_detected", 0) else [],
 }
 
-int_path = OUT / CSV_FILENAME.replace(".csv", "_interpretation.json")
-with open(int_path, "w") as fp:
-    json.dump(interpretation, fp, indent=2)
+n_gpu = len([c for c in df.columns if c.startswith("gpu_")])
+n_cpu = len([c for c in df.columns if c.startswith("cpu_")])
+n_zero = sum((df[c] == 0.0).all() for c in df.columns if c.startswith("gpu_"))
+n_nonzero_val = n_gpu - n_zero
+
+interpretation = build_physical_interpretation(
+    target_date=TARGET_DATE,
+    counts=counts,
+    hxr_fb=hxr4_combined[:, 4],
+    hxr_bands=hxr4_combined[:, :5] if hxr4_combined.shape[1] >= 5 else hxr4_combined,
+    hxr_cdte1=hxr4_combined[:, 14]
+    if hxr4_combined.shape[1] > 14
+    else np.zeros_like(counts),
+    time_s=time_s,
+    sxr_headers={"mjdrefi": sxr["mjdrefi"], "mjdreff": sxr["mjdreff"]},
+    gti=gti,
+    goes_xrsb_arr=goes_xrsb_arr,
+    goes_xrsa_arr=goes_xrsa_arr,
+    flares=flares,
+    qpp_result=qpp_result,
+    gc_result=gc_result,
+    feature_values=feature_values,
+    df_columns=int(len(df.columns)),
+    n_gpu_features=n_gpu,
+    n_cpu_features=n_cpu,
+    n_nonzero=n_nonzero_val,
+    runtime_sec=time.time() - t_total,
+)
+interpretation["csv_file"] = CSV_FILENAME
+
+int_path = save_interpretation(interpretation, csv_path)
 print(f"  Interpretations: {int_path}", flush=True)
 
 # ═══════════════════════════════════════════════════════════
 # 7. SUMMARY
+n_x = int((df["flare_class"] == "X").sum())
+n_m = int((df["flare_class"] == "M").sum())
+n_c = int((df["flare_class"] == "C").sum())
 # ═══════════════════════════════════════════════════════════
 print(f"\n=== MASTER CSV SUMMARY ===", flush=True)
 print(f"File: {csv_path}", flush=True)
