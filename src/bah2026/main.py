@@ -1,4 +1,4 @@
-`"""
+"""
 BAH 2026 Challenge 15 — Solar Flare Nowcasting & Forecasting Pipeline.
 
 Usage:
@@ -1329,8 +1329,13 @@ def cmd_features(
     return X, y, fnames
 
 
+def cmd_forecast(
+    X: np.ndarray | None = None,
+    y: np.ndarray | None = None,
+    feature_names: list[str] | None = None,
+) -> dict:
+    """Phase 4: Train and evaluate forecasting models with proper time-series CV.
 
-<<<<<<< HEAD
     Key fixes from v0:
       - Data comes in chronological day order (from cmd_features using imap)
       - Train/val/test split by day with embargo to prevent leakage
@@ -1480,8 +1485,6 @@ def cmd_features(
     plot_model_evaluation(results)
     print(f"Results: {CATALOGS_DIR / 'forecast_results.json'}")
     return results
-=======
->>>>>>> 5df5451 (add stage 3 forecasting and nowcasting pipeline)
 
 
 def cmd_train() -> dict:
