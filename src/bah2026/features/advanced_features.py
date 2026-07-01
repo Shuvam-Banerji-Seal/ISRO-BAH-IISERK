@@ -496,7 +496,10 @@ def extract_per_window_spectral(
         n_czt = summed_czt.shape[0]
         czt_energies = np.linspace(20.0, 150.0, n_czt)
         t_init = sxr_temp if sxr_temp > 0 else 10.0
-        em_init = sxr_em if sxr_em > 0 else float(np.max(summed_czt)) * 10.0
+        # Estimate EM from CZT data directly — SoLEXS PI EM (1e52) is in different
+        # units and produces thermal model that dominates CZT counts (~5e4)
+        czt_total = float(np.sum(summed_czt))
+        em_init = max(czt_total * 10.0, 1e3) if czt_total > 0 else 1e3
         try:
             sep = separate_thermal_non_thermal(
                 czt_energies, summed_czt, t_init, em_init

@@ -237,44 +237,75 @@ if goes_xrsb_arr is not None:
     if pre["goes_xrsb_flux"] > 0:
         pre["goes_xrsa_xrsb_ratio"] = pre["goes_xrsa_flux"] / pre["goes_xrsb_flux"]
 
-# Info theory
+# Info theory — filter NaN from HXR (padding gaps)
 ds2 = 60
 sxr_ds = counts[::ds2].astype(np.float32)
-hxr_ds = hxr4_combined[::ds2, 4].astype(np.float32)
-if len(sxr_ds) > 20:
+hxr_ds_raw = hxr4_combined[::ds2, 4].astype(np.float32)
+valid_it = np.isfinite(sxr_ds) & np.isfinite(hxr_ds_raw)
+if valid_it.sum() > 20:
+    sxr_ds_v = sxr_ds[valid_it]
+    hxr_ds_v = hxr_ds_raw[valid_it]
     pre["transfer_entropy_hxr_to_sxr"] = float(
-        transfer_entropy(hxr_ds, sxr_ds, k=1, bins=8)
+        transfer_entropy(hxr_ds_v, sxr_ds_v, k=1, bins=8)
     )
     pre["mutual_information_sxr_hxr"] = float(
-        mutual_information(sxr_ds, hxr_ds, bins=8)
+        mutual_information(sxr_ds_v, hxr_ds_v, bins=8)
     )
-    pre["sample_entropy_sxr"] = float(sample_entropy(sxr_ds[:200], m=2, r_factor=0.2))
-    lc, ll = lagged_cross_correlation(
-        hxr4_combined[:, 4].astype(np.float32), counts.astype(np.float32), max_lag=100
+    pre["sample_entropy_sxr"] = float(sample_entropy(sxr_ds_v[:200], m=2, r_factor=0.2))
+    # Lagged cross-correlation on full-day data (filter NaN)
+    valid_lc = np.isfinite(hxr4_combined[:, 4]) & np.isfinite(counts)
+    if valid_lc.sum() > 200:
+        lc, ll = lagged_cross_correlation(
+            hxr4_combined[valid_lc, 4].astype(np.float32),
+            counts[valid_lc].astype(np.float32),
+            max_lag=100,
+        )
+        pre["lagged_cross_corr"] = float(lc) if np.isfinite(lc) else 0.0
+        pre["lagged_cross_corr_lag"] = float(ll)
+    else:
+        pre["lagged_cross_corr"] = 0.0
+        pre["lagged_cross_corr_lag"] = 0.0
+else:
+    for k in [
+        "transfer_entropy_hxr_to_sxr",
+        "mutual_information_sxr_hxr",
+        "sample_entropy_sxr",
+        "lagged_cross_corr",
+        "lagged_cross_corr_lag",
+    ]:
+        pre[k] = 0.0
+
+# QPP — filter NaN from HXR
+hxr_qpp = hxr4_combined[:, 4].astype(np.float32)
+hxr_qpp_valid = hxr_qpp[np.isfinite(hxr_qpp)]
+if len(hxr_qpp_valid) > 100:
+    qpp = detect_qpp(hxr_qpp_valid, dt=1.0, min_period=10, max_period=300)
+    pre["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
+    pre["qpp_period"] = float(qpp["period"])
+    pre["qpp_amplitude"] = float(qpp["amplitude"])
+    pre["qpp_significance"] = (
+        float(qpp["significance"]) if np.isfinite(qpp["significance"]) else 0.0
     )
-    pre["lagged_cross_corr"] = float(lc) if np.isfinite(lc) else 0.0
-    pre["lagged_cross_corr_lag"] = float(ll)
+else:
+    for k in ["qpp_detected", "qpp_period", "qpp_amplitude", "qpp_significance"]:
+        pre[k] = 0.0
 
-# QPP
-qpp = detect_qpp(
-    hxr4_combined[:, 4].astype(np.float32), dt=1.0, min_period=10, max_period=300
-)
-pre["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
-pre["qpp_period"] = float(qpp["period"])
-pre["qpp_amplitude"] = float(qpp["amplitude"])
-pre["qpp_significance"] = (
-    float(qpp["significance"]) if np.isfinite(qpp["significance"]) else 0.0
-)
-
-# Granger + mediation
+# Granger + mediation — filter NaN from both HXR and SXR
 ds = 10
-dsxr = np.diff(counts[::ds])
-hxr_fb = hxr4_combined[::ds, 4]
-gc = granger_causality_simple(
-    hxr_fb.astype(np.float32), dsxr.astype(np.float32), max_lag=30, n_splits=3
-)
-pre["neupert_granger_improvement"] = float(gc["improvement"])
-pre["neupert_best_lag"] = float(gc["best_lag"])
+sxr_fb_gc = counts[::ds]
+hxr_fb_gc = hxr4_combined[::ds, 4]
+valid_gc = np.isfinite(sxr_fb_gc) & np.isfinite(hxr_fb_gc)
+if valid_gc.sum() > 100:
+    dsxr = np.diff(sxr_fb_gc[valid_gc])
+    hxr_fb_gc_v = hxr_fb_gc[valid_gc][1:]  # align with diff
+    gc = granger_causality_simple(
+        hxr_fb_gc_v.astype(np.float32), dsxr.astype(np.float32), max_lag=30, n_splits=3
+    )
+    pre["neupert_granger_improvement"] = float(gc["improvement"])
+    pre["neupert_best_lag"] = float(gc["best_lag"])
+else:
+    pre["neupert_granger_improvement"] = 0.0
+    pre["neupert_best_lag"] = 0.0
 hxr_v = hxr4_combined[::ds, 1]
 med_v = hxr4_combined[::ds, 6]
 out_v = counts[::ds]
@@ -336,6 +367,9 @@ try:
         pre["sample_entropy_hxr"] = 0.0
 except Exception:
     pre["sample_entropy_hxr"] = 0.0
+
+# window_len = lookback for every window
+pre["window_len"] = float(lookback)
 
 # ── CZT2 / CdTe2 day-level features ──────────────────────────────────
 try:
