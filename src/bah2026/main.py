@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import warnings
 from datetime import date, timedelta
 from pathlib import Path
@@ -34,6 +35,7 @@ from bah2026.config import (
     DATA_ROOT,
     CATALOGS_DIR,
     HDF5_DIR,
+    MODELS_DIR,
     N_WORKERS,
     FEATURE_LOOKBACK_SEC,
     FEATURE_STEP_SEC,
@@ -709,6 +711,300 @@ def _process_day_features(
     return X, y
 
 
+def _process_day_features_gpu(
+    args: tuple[date, list[float]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """GPU-accelerated single-day feature extraction.
+
+    Uses GPU batch for sliding window features (~277 windows in parallel)
+    plus CPU day-level features. Significantly faster than the CPU-only
+    _process_day_features (~10s vs ~120s per day).
+
+    Mirrors the approach in generate_master_csv.py but returns feature
+    matrices instead of saving CSV.
+    """
+    d, day_event_times = args
+    import torch
+
+    LOOKBACK = 3600
+    STEP = 300
+    FORECAST_WINDOW = 1800
+
+    try:
+        sxr = load_solexs_lc(d)
+    except FileNotFoundError:
+        return np.empty((0, 0)), np.array([])
+
+    # ── Load & correct data ──────────────────────────────────────────
+    counts_raw = np.where(
+        np.isfinite(sxr["counts"]), sxr["counts"], np.nanmedian(sxr["counts"])
+    )
+    counts = correct_solexs_deadtime(counts_raw).astype(np.float32)
+    time_s = sxr["time"]
+
+    # HXR: all 4 detectors, 20 bands
+    hxr4 = np.zeros((len(counts), 20), dtype=np.float32)
+    for idx, (det, num) in enumerate(
+        [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]
+    ):
+        try:
+            hx = load_hel1os_lc(d, detector=det, num=num)
+            if hx["ctr"].size > 0:
+                ctr = subtract_hel1os_background(hx["ctr"], det)
+                a = align_hel1os_to_solexs(
+                    hx["mjd"], ctr, time_s, sxr["mjdrefi"], sxr["mjdreff"]
+                )
+                ml = min(len(counts), a.shape[0])
+                hxr4[:ml, idx * 5 : (idx + 1) * 5] = a[:ml, :5].astype(np.float32)
+        except Exception:
+            pass
+
+    n_w = (len(counts) - LOOKBACK) // STEP + 1
+    if n_w < 1:
+        return np.empty((0, 0)), np.array([])
+
+    # ── GPU batch features ───────────────────────────────────────────
+    sxr_np = np.zeros((n_w, LOOKBACK), dtype=np.float32)
+    hxr_np = np.zeros((n_w, LOOKBACK, 20), dtype=np.float32)
+    for wi in range(n_w):
+        s = wi * STEP
+        sxr_np[wi] = counts[s : s + LOOKBACK]
+        hxr_np[wi] = hxr4[s : s + LOOKBACK]
+
+    sxr_g = torch.from_numpy(sxr_np).to("cuda")
+    hxr_g = torch.from_numpy(hxr_np).to("cuda")
+    torch.cuda.synchronize()
+
+    from bah2026.features.gpu_features import (
+        _batch_stats,
+        _batch_acf,
+        _batch_spectral_entropy,
+        _batch_derivative_features,
+        _batch_multiscale,
+        _batch_neupert,
+        _batch_hxr_features,
+        _batch_pi_spectral_features,
+        FEATURE_AUTOCORR_LAGS,
+        get_canonical_feature_names,
+    )
+
+    feats = {}
+    feats.update(_batch_stats(sxr_g))
+    feats.update(_batch_acf(sxr_g, FEATURE_AUTOCORR_LAGS))
+    feats.update(_batch_spectral_entropy(sxr_g))
+    feats.update(_batch_derivative_features(sxr_g, hxr_g))
+    feats.update(_batch_multiscale(sxr_g, hxr_g))
+    feats.update(_batch_neupert(sxr_g, hxr_g))
+    feats.update(_batch_hxr_features(hxr_g))
+    feats.update(_batch_pi_spectral_features(hxr_g))
+    torch.cuda.synchronize()
+
+    # ── CPU day-level features (same as _process_day_features) ───────
+    gti = load_solexs_gti(d)
+    hk = load_hel1os_hk(d)
+    pi = load_solexs_pi(d)
+    pi_sum = np.nansum(pi["counts"], axis=0)
+
+    pre: dict = {}
+
+    # Temperature from PI
+    try:
+        T, EM, chi2 = fit_temperature(pi_sum)
+        pre["sxr_temperature_mk"] = float(T)
+        pre["sxr_emission_measure"] = float(EM)
+        pre["sxr_chi2_red"] = float(chi2) if np.isfinite(chi2) and chi2 < 1e10 else 0.0
+    except Exception:
+        pass
+
+    # Spectral indices
+    for det_key, num, spec_key in [
+        ("czt", 1, "hxr_spectral_index_gamma"),
+        ("czt", 2, "hxr_gamma_czt2"),
+        ("cdte", 1, "hxr_gamma_cdte1"),
+        ("cdte", 2, "hxr_gamma_cdte2"),
+    ]:
+        try:
+            spec = load_hel1os_spectra(d, detector=det_key, num=num)
+            if spec["counts"].size > 0:
+                s = np.nansum(spec["counts"][:100, :], axis=0)
+                nch = len(s)
+                bp = max(nch // 4, 1)
+                cents = (
+                    np.array([30, 50, 70, 115], dtype=float)
+                    if det_key == "czt"
+                    else np.array([12, 25, 35, 50], dtype=float)
+                )
+                rates = np.array(
+                    [np.sum(s[i * bp : (i + 1) * bp]) for i in range(4)], dtype=float
+                )
+                pre[spec_key] = fit_spectral_index(np.maximum(rates, 1e-10), cents)
+        except Exception:
+            pass
+
+    # Non-thermal
+    try:
+        energies = load_channel_energies()
+        centroids = (energies[0] + energies[1]) / 2.0
+        cdte_avg = np.nanmean(
+            load_hel1os_spectra(d, detector="cdte", num=1)["counts"], axis=0
+        )
+        cdte_e = np.linspace(5.0, 90.0, len(cdte_avg))
+        valid_pi = pi_sum > 0
+        sep = fit_combined_spectrum(
+            centroids[valid_pi],
+            pi_sum[valid_pi],
+            cdte_e,
+            cdte_avg,
+            t_mk_init=max(pre.get("sxr_temperature_mk", 10.0), 5.0),
+        )
+        pre["nonthermal_gamma"] = sep.get("gamma", 0.0)
+        pre["nonthermal_ec"] = sep.get("ec", 0.0)
+        pre["nonthermal_n_nth"] = sep.get("n_nth", 0.0)
+        pre["thermal_fraction"] = float(
+            np.clip(sep.get("thermal_fraction", 0.0), 0.0, 1.0)
+        )
+    except Exception:
+        pass
+
+    # HK features
+    for hk_key, pre_key in [
+        ("czt1temp", "hk_czt1temp"),
+        ("czt2temp", "hk_czt2temp"),
+        ("cdte1temp", "hk_cdte1temp"),
+        ("cdte2temp", "hk_cdte2temp"),
+        ("czthvmon", "hk_czthvmon"),
+        ("cdtehvmon", "hk_cdtehvmon"),
+        ("czt1satctr1", "hk_czt1satctr"),
+        ("cdte1pilectr", "hk_cdte1pilectr"),
+    ]:
+        try:
+            if hk_key in hk and len(hk[hk_key]) > 0:
+                pre[pre_key] = float(np.median(hk[hk_key][np.isfinite(hk[hk_key])]))
+        except Exception:
+            pass
+
+    # CZT2/CdTe2
+    for prefix, arr in [("czt2", hxr4[:, 9]), ("cdte2", hxr4[:, 19])]:
+        v = arr[np.isfinite(arr) & (arr > 0)]
+        if len(v) > 0:
+            pre[f"{prefix}_total_mean"] = float(np.mean(v))
+            pre[f"{prefix}_total_max"] = float(np.max(v))
+            pre[f"{prefix}_total_std"] = float(np.std(v))
+
+    # Deadtime (GTI gap fraction)
+    if gti.size > 0 and len(time_s) > 1:
+        ts = time_s[-1] - time_s[0]
+        gt = float(np.sum(gti[:, 1] - gti[:, 0]))
+        pre["deadtime_max_pct"] = float(
+            max(0.0, min(100.0, (1.0 - gt / max(ts, 1e-6)) * 100.0))
+        )
+
+    # GOES
+    goes_xrsb_arr = goes_xrsa_arr = None
+    for nc_file in Path(GOES_DATA_DIR).glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
+        try:
+            from netCDF4 import Dataset as NCD
+
+            with NCD(str(nc_file), "r") as nc:
+                gf_b = np.where(
+                    nc.variables["xrsb_flux"][:] < 0,
+                    np.nan,
+                    nc.variables["xrsb_flux"][:],
+                ).astype(np.float64)
+                gf_a = np.where(
+                    nc.variables["xrsa_flux"][:] < 0,
+                    np.nan,
+                    nc.variables["xrsa_flux"][:],
+                ).astype(np.float64)
+                if len(gf_b) > 10:
+                    goes_xrsb_arr = gf_b
+                    goes_xrsa_arr = gf_a
+                    pre["goes_xrsb_flux"] = float(np.nanmax(gf_b))
+                    pre["goes_xrsa_flux"] = float(np.nanmax(gf_a))
+                    if pre["goes_xrsb_flux"] > 0:
+                        pre["goes_xrsa_xrsb_ratio"] = (
+                            pre["goes_xrsa_flux"] / pre["goes_xrsb_flux"]
+                        )
+        except Exception:
+            pass
+        break
+
+    # Granger causality
+    try:
+        ds_gc = 10
+        sxr_gc = counts[::ds_gc]
+        hxr_gc = hxr4[::ds_gc, 4]
+        vgc = np.isfinite(sxr_gc) & np.isfinite(hxr_gc)
+        if vgc.sum() > 100:
+            dsxr_gc = np.diff(sxr_gc[vgc])
+            hxr_gc_v = hxr_gc[vgc][1:]
+            gc = granger_causality_simple(
+                hxr_gc_v.astype(np.float32),
+                dsxr_gc.astype(np.float32),
+                max_lag=30,
+                n_splits=3,
+            )
+            pre["neupert_granger_improvement"] = float(gc["improvement"])
+            pre["neupert_best_lag"] = float(gc["best_lag"])
+    except Exception:
+        pass
+
+    # QPP
+    qpp = detect_qpp(
+        hxr4[:, 4][np.isfinite(hxr4[:, 4])], dt=1.0, min_period=10, max_period=300
+    )
+    pre["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
+    pre["qpp_period"] = float(qpp["period"])
+    pre["qpp_amplitude"] = float(qpp["amplitude"])
+    pre["qpp_significance"] = (
+        float(qpp["significance"]) if np.isfinite(qpp["significance"]) else 0.0
+    )
+
+    # window_len
+    pre["window_len"] = float(LOOKBACK)
+
+    # ── Assemble feature matrix ──────────────────────────────────────
+    canonical = get_canonical_feature_names()
+    row = torch.zeros(n_w, len(canonical), device="cuda", dtype=torch.float32)
+    for fi, fn in enumerate(canonical):
+        if (
+            fn in feats
+            and isinstance(feats[fn], torch.Tensor)
+            and feats[fn].shape[0] == n_w
+        ):
+            row[:, fi] = feats[fn]
+
+    # Inject day-level precomputed (clip extreme values for float32)
+    for fi, fn in enumerate(canonical):
+        if fn in pre and (row[:, fi] == 0).all():
+            try:
+                val = float(pre[fn])
+                if np.isfinite(val):
+                    val = np.clip(val, -1e10, 1e10)
+                    row[:, fi] = val
+            except (ValueError, OverflowError):
+                pass
+
+    torch.cuda.synchronize()
+    X = row.cpu().numpy().astype(np.float32)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Clear GPU cache to prevent memory buildup across days
+    del sxr_g, hxr_g, row, feats
+    torch.cuda.empty_cache()
+
+    # Labels
+    y = np.zeros(n_w, dtype=int)
+    if day_event_times:
+        for wi in range(n_w):
+            t = time_s[min(wi * STEP + LOOKBACK, len(time_s) - 1)]
+            y[wi] = (
+                1 if any(0 < et - t <= FORECAST_WINDOW for et in day_event_times) else 0
+            )
+
+    return X, y
+
+
 # ── Pipeline Commands ─────────────────────────────────────────────────
 
 
@@ -799,15 +1095,27 @@ def cmd_nowcast(days: list[date] | None = None) -> pd.DataFrame:
 def cmd_features(
     days: list[date] | None = None,
     events_df: pd.DataFrame | None = None,
+    sequential: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Phase 3: Build feature matrix in chronological order."""
-    from bah2026.data import discover_combined_days
-    from bah2026.visualization import (
-        plot_feature_importance,
-        plot_feature_distributions,
-    )
+    """Phase 3: Build feature matrix in chronological order.
 
-    print(f"\n── Phase 3: Features ({N_WORKERS} workers) ──")
+    Parameters
+    ----------
+    days : list of date, optional
+        Days to process. If None, discover all combined days.
+    events_df : DataFrame, optional
+        Nowcast catalogue with flare event times.
+    sequential : bool
+        If True, process days sequentially (avoids Pool subprocess hangs).
+        If False, use parallel Pool (default).
+    """
+    from bah2026.data import discover_combined_days
+    from bah2026.features.engineering import get_canonical_feature_names
+    from tqdm import tqdm
+
+    mode = "Sequential" if sequential else f"{N_WORKERS} workers"
+    print(f"\n── Phase 3: Features ({mode}) ──")
+
     if days is None:
         days = discover_combined_days()
     if events_df is None:
@@ -821,29 +1129,33 @@ def cmd_features(
     for _, row in events_df.iterrows():
         event_times.setdefault(row["date"], []).append(row["peak_time"])
 
-    from bah2026.features.engineering import get_canonical_feature_names
-
     feature_names = get_canonical_feature_names()
-
-    # IMPORTANT: use imap (ordered), not imap_unordered, so features
-    # come back in chronological day order for proper time-series split
     work = [(d, event_times.get(str(d), [])) for d in days]
 
     all_X, all_y = [], []
-    with Pool(N_WORKERS) as pool:
-        results = list(
-            tqdm(
-                pool.imap(_process_day_features, work, chunksize=4),
-                total=len(work),
-                desc="Extracting features",
-            )
-        )
 
-    for X_day, y_day in results:
-        if X_day.size == 0:
-            continue
-        all_X.append(X_day)
-        all_y.append(y_day)
+    if sequential:
+        # Sequential processing — avoids Pool subprocess hangs
+        for d in tqdm(days, desc="Extracting features (sequential)"):
+            X_day, y_day = _process_day_features((d, event_times.get(str(d), [])))
+            if X_day.size > 0:
+                all_X.append(X_day)
+                all_y.append(y_day)
+    else:
+        # Parallel processing with Pool
+        with Pool(N_WORKERS) as pool:
+            results = list(
+                tqdm(
+                    pool.imap(_process_day_features, work, chunksize=4),
+                    total=len(work),
+                    desc="Extracting features",
+                )
+            )
+        for X_day, y_day in results:
+            if X_day.size == 0:
+                continue
+            all_X.append(X_day)
+            all_y.append(y_day)
 
     if not all_X:
         print("No features extracted!")
@@ -861,6 +1173,11 @@ def cmd_features(
         json.dump(fnames, fp)
 
     if X.size and y.sum() >= 10:
+        from bah2026.visualization import (
+            plot_feature_importance,
+            plot_feature_distributions,
+        )
+
         plot_feature_importance(X, y, fnames)
         plot_feature_distributions(X, y, fnames)
 
@@ -1007,8 +1324,66 @@ def cmd_forecast(
     with open(CATALOGS_DIR / "forecast_results.json", "w") as fp:
         json.dump(serializable, fp, indent=2)
 
+    # ── Save model checkpoints ─────────────────────────────────────────
+    try:
+        import joblib
+
+        for name, model in models.items():
+            ckpt_path = MODELS_DIR / f"{name.lower()}_checkpoint.joblib"
+            joblib.dump(model, ckpt_path)
+            print(f"  Checkpoint saved: {ckpt_path}")
+        # Save scaler
+        joblib.dump(sc, MODELS_DIR / "scaler.joblib")
+    except Exception as e:
+        print(f"  Checkpoint save skipped: {e}")
+
     plot_model_evaluation(results)
     print(f"Results: {CATALOGS_DIR / 'forecast_results.json'}")
+    return results
+
+
+def cmd_train() -> dict:
+    """Full pipeline: nowcast + features (sequential) + forecast.
+
+    Processes all days sequentially (avoids Pool subprocess hangs),
+    then trains CatBoost/XGBoost/LightGBM with checkpointing.
+    """
+    print("\n" + "=" * 60)
+    print("  TRAIN: Nowcast → Features (sequential) → Forecast")
+    print("=" * 60)
+
+    from bah2026.data import discover_combined_days
+
+    ensure_output_dirs()
+
+    # Phase 1: Nowcast (sequential)
+    print("\n── Phase 1: Nowcast (sequential) ──")
+    days = discover_combined_days()
+    print(f"  Processing {len(days)} days...")
+    all_events = []
+    t0 = time.time()
+    for i, d in enumerate(days):
+        evts = _process_day_nowcast((d, str(d)))
+        all_events.extend(evts)
+        if (i + 1) % 100 == 0:
+            print(
+                f"    [{i + 1}/{len(days)}] {d}: {len(evts)} events ({time.time() - t0:.0f}s)"
+            )
+    events_df = pd.DataFrame(all_events)
+    events_df.to_csv(CATALOGS_DIR / "nowcast_catalogue.csv", index=False)
+    print(f"  Nowcast: {len(all_events)} events in {time.time() - t0:.1f}s")
+
+    # Phase 2: Features (sequential)
+    X, y, fnames = cmd_features(days, events_df, sequential=True)
+
+    # Phase 3: Forecast
+    results = cmd_forecast(X, y, fnames)
+
+    print("\n" + "=" * 60)
+    print("  Training complete.")
+    if "CatBoost" in results:
+        print(f"  Best TSS: {results['CatBoost']['tss']:.4f}")
+    print("=" * 60)
     return results
 
 
@@ -1056,6 +1431,7 @@ def main():
         default="all",
         choices=[
             "all",
+            "train",
             "explore",
             "nowcast",
             "features",
