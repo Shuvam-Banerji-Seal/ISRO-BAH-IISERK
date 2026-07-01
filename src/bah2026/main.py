@@ -46,6 +46,71 @@ from bah2026.config import (
     ensure_output_dirs,
 )
 
+# ── Module-level imports for Pool workers (avoids subprocess hangs) ──
+from bah2026.data.reader import (
+    load_solexs_lc,
+    load_solexs_pi,
+    load_solexs_gti,
+    load_hel1os_lc,
+    load_hel1os_gti,
+    load_hel1os_spectra,
+    load_hel1os_hk,
+    load_hel1os_all_gti,
+)
+from bah2026.data.preprocessing import (
+    align_hel1os_to_solexs,
+    compute_gti_mask,
+    forward_fill_nan,
+)
+from bah2026.data.corrections import (
+    correct_solexs_deadtime,
+    subtract_hel1os_background,
+)
+from bah2026.data.calibration import (
+    solexs_counts_to_irradiance_simple,
+    load_channel_energies,
+)
+from bah2026.models.nowcasting import (
+    detect_flares_swpc,
+    detect_flares_hel1os,
+    coincidence_merge,
+    background_subtract_simple,
+)
+from bah2026.models.adaptive_detection import (
+    detect_flares_adaptive,
+    classify_solexs_helios,
+)
+from bah2026.features.engineering import (
+    extract_features_window,
+    get_canonical_feature_names,
+    pad_features_to_canonical,
+)
+from bah2026.features.spectral_fitting import (
+    fit_temperature,
+    fit_spectral_index,
+)
+from bah2026.features.non_thermal import (
+    separate_thermal_non_thermal,
+    fit_combined_spectrum,
+)
+from bah2026.features.information_theory import (
+    transfer_entropy,
+    mutual_information,
+    sample_entropy,
+    lagged_cross_correlation,
+)
+from bah2026.features.qpp import detect_qpp
+from bah2026.features.causal_network import (
+    granger_causality_simple,
+    mediation_analysis,
+    extract_causal_network_features,
+)
+from bah2026.features.advanced_features import (
+    extract_goes_timeseries_features,
+    extract_per_window_spectral,
+    extract_wavelet_scalogram_features,
+)
+
 
 # ── Combined Nowcasting Worker ────────────────────────────────────────
 
@@ -60,27 +125,6 @@ def _process_day_nowcast(args: tuple[date, str]) -> list[dict]:
       3. Merge by temporal coincidence (SXR-only kept only if ≥C-class)
     """
     d, _ = args
-    from bah2026.data.reader import (
-        load_solexs_lc,
-        load_hel1os_lc,
-        load_solexs_gti,
-        load_hel1os_gti,
-    )
-    from bah2026.data.preprocessing import (
-        compute_gti_mask,
-        forward_fill_nan,
-    )
-    from bah2026.data.corrections import (
-        correct_solexs_deadtime,
-        subtract_hel1os_background,
-    )
-    from bah2026.models.nowcasting import (
-        detect_flares_swpc,
-        detect_flares_hel1os,
-        coincidence_merge,
-        background_subtract_simple,
-    )
-    from bah2026.data.calibration import solexs_counts_to_irradiance_simple
 
     try:
         solexs = load_solexs_lc(d)
@@ -192,32 +236,6 @@ def _process_day_features(
       - QPP detection
     """
     d, day_event_times = args
-    from bah2026.data.reader import (
-        load_solexs_lc,
-        load_solexs_pi,
-        load_hel1os_lc,
-        load_hel1os_spectra,
-        load_hel1os_hk,
-        load_hel1os_all_gti,
-    )
-    from bah2026.data.preprocessing import align_hel1os_to_solexs, compute_gti_mask
-    from bah2026.data.corrections import (
-        correct_solexs_deadtime,
-        subtract_hel1os_background,
-    )
-    from bah2026.features.engineering import (
-        extract_features_window,
-        get_canonical_feature_names,
-        pad_features_to_canonical,
-    )
-    from bah2026.features.spectral_fitting import (
-        fit_temperature,
-        fit_spectral_index,
-    )
-    from bah2026.features.non_thermal import separate_thermal_non_thermal
-    import warnings
-
-    warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     try:
         sxr = load_solexs_lc(d)
@@ -449,7 +467,9 @@ def _process_day_features(
         "bg_fraction_pct": bg_fraction,
         "sxr_temperature_mk": pi_temp,
         "sxr_emission_measure": pi_em,
-        "sxr_chi2_red": pi_chi2,
+        "sxr_chi2_red": float(np.clip(pi_chi2, 0.0, 1e6))
+        if np.isfinite(pi_chi2)
+        else 999.0,
     }
 
     # CZT2 / CdTe2 aggregated stats from aligned data

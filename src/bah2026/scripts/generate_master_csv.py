@@ -180,7 +180,7 @@ try:
     T, EM, chi2 = fit_temperature(pi_sum)
     pre["sxr_temperature_mk"] = float(T)
     pre["sxr_emission_measure"] = float(EM)
-    pre["sxr_chi2_red"] = float(chi2) if np.isfinite(chi2) and chi2 < 1e10 else 0.0
+    pre["sxr_chi2_red"] = float(np.clip(chi2, 0.0, 1e6)) if np.isfinite(chi2) else 999.0
 except:
     pass
 for det, num, key in [
