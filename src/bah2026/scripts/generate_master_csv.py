@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""Master CSV generator — all analysis for a single day."""
+
+import sys, os, warnings, time, json, numpy as np
+
+sys.path.insert(0, "src")
+os.environ["BAH2026_DATA"] = os.path.abspath("data/processed")
+warnings.filterwarnings("ignore")
+import torch, pandas as pd
+from datetime import date, timedelta, datetime
+from pathlib import Path
+
+TARGET_DATE = date(2024, 5, 5)
+OUT = Path("output/master_csv")
+OUT.mkdir(parents=True, exist_ok=True)
+
+print(f"=== MASTER CSV: {TARGET_DATE} ===", flush=True)
+t_total = time.time()
+
+# ═══════════════════════════════════════════════════════════
+# 1. LOAD ALL DATA
+# ═══════════════════════════════════════════════════════════
+from bah2026.data.reader import (
+    load_solexs_lc,
+    load_solexs_pi,
+    load_solexs_gti,
+    load_hel1os_lc,
+    load_hel1os_hk,
+    load_hel1os_spectra,
+)
+from bah2026.data.preprocessing import align_hel1os_to_solexs
+from bah2026.data.corrections import correct_solexs_deadtime, subtract_hel1os_background
+from bah2026.features.gpu_features import (
+    _batch_stats,
+    _batch_acf,
+    _batch_spectral_entropy,
+    _batch_derivative_features,
+    _batch_multiscale,
+    _batch_neupert,
+    _batch_hxr_features,
+    _batch_pi_channel_features,
+    FEATURE_AUTOCORR_LAGS,
+    get_canonical_feature_names,
+)
+from bah2026.features.spectral_fitting import fit_temperature, fit_spectral_index
+from bah2026.features.non_thermal import fit_combined_spectrum
+from bah2026.features.causal_network import granger_causality_simple, mediation_analysis
+from bah2026.features.information_theory import (
+    transfer_entropy,
+    mutual_information,
+    sample_entropy,
+    lagged_cross_correlation,
+)
+from bah2026.features.qpp import detect_qpp
+from bah2026.models.adaptive_detection import (
+    detect_flares_adaptive,
+    classify_solexs_helios,
+)
+from bah2026.data.calibration import load_channel_energies
+
+print("Loading data...", flush=True)
+t0 = time.time()
+d = TARGET_DATE
+sxr = load_solexs_lc(d)
+counts_raw = np.where(
+    np.isfinite(sxr["counts"]), sxr["counts"], np.nanmedian(sxr["counts"])
+)
+counts = correct_solexs_deadtime(counts_raw).astype(np.float32)
+time_s = sxr["time"]
+
+tstart_mjd = sxr["tstart"]
+mjd_start = sxr["mjdrefi"] + sxr["mjdreff"] + tstart_mjd / 86400.0
+start_utc = datetime(1858, 11, 17) + timedelta(days=mjd_start)
+utc_times = np.array([start_utc + timedelta(seconds=t) for t in time_s])
+
+hxr_all = {}
+for det, num in [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]:
+    try:
+        hx = load_hel1os_lc(d, detector=det, num=num)
+        if hx["ctr"].size > 0:
+            ctr = subtract_hel1os_background(hx["ctr"], det)
+            aligned = align_hel1os_to_solexs(
+                hx["mjd"], ctr, time_s, sxr["mjdrefi"], sxr["mjdreff"]
+            )
+            hxr_all[f"{det}{num}"] = aligned
+    except:
+        pass
+
+pi = load_solexs_pi(d)
+pr = pi["counts"].astype(np.float32)
+pi_sum = np.nansum(pr, axis=0)
+hk = load_hel1os_hk(d)
+gti = load_solexs_gti(d)
+
+specs = {}
+for det, num in [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]:
+    try:
+        specs[f"{det}{num}"] = load_hel1os_spectra(d, detector=det, num=num)
+    except:
+        pass
+
+goes_xrsb_arr = goes_xrsa_arr = None
+try:
+    from pathlib import Path as P
+    from netCDF4 import Dataset as NCD
+
+    for nc in P("data/external/goes").glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
+        with NCD(str(nc), "r") as nc:
+            goes_xrsb_arr = np.where(
+                nc.variables["xrsb_flux"][:] < 0, np.nan, nc.variables["xrsb_flux"][:]
+            ).astype(np.float64)
+            goes_xrsa_arr = np.where(
+                nc.variables["xrsa_flux"][:] < 0, np.nan, nc.variables["xrsa_flux"][:]
+            ).astype(np.float64)
+        break
+except:
+    pass
+
+print(f"  Loaded in {time.time() - t0:.1f}s", flush=True)
+
+# ═══════════════════════════════════════════════════════════
+# 2. GPU FEATURES
+# ═══════════════════════════════════════════════════════════
+print("Computing GPU features...", flush=True)
+t0 = time.time()
+lookback, step = 3600, 300
+n_w = (len(counts) - lookback) // step + 1
+
+# Get combined HXR first
+hxr4_combined = np.zeros((len(counts), 20), dtype=np.float32)
+for idx, key in enumerate(["czt1", "czt2", "cdte1", "cdte2"]):
+    if key in hxr_all:
+        ml = min(len(counts), hxr_all[key].shape[0])
+        hxr4_combined[:ml, idx * 5 : (idx + 1) * 5] = hxr_all[key][:ml, :5].astype(
+            np.float32
+        )
+
+sxr_np = np.zeros((n_w, lookback), dtype=np.float32)
+hxr_np = np.zeros((n_w, lookback, 20), dtype=np.float32)
+pi_win = np.zeros((n_w, 340), dtype=np.float32)
+for wi in range(n_w):
+    s = wi * step
+    sxr_np[wi] = counts[s : s + lookback]
+    hxr_np[wi] = hxr4_combined[s : s + lookback]
+    pi_win[wi] = np.nansum(pr[s : s + lookback], axis=0)
+
+sxr_g = torch.from_numpy(sxr_np).to("cuda")
+hxr_g = torch.from_numpy(hxr_np).to("cuda")
+pi_g = torch.from_numpy(pi_win).to("cuda")
+feats_gpu = {}
+feats_gpu.update(_batch_stats(sxr_g))
+feats_gpu.update(_batch_acf(sxr_g, FEATURE_AUTOCORR_LAGS))
+feats_gpu.update(_batch_spectral_entropy(sxr_g))
+feats_gpu.update(_batch_derivative_features(sxr_g, hxr_g))
+feats_gpu.update(_batch_multiscale(sxr_g, hxr_g))
+feats_gpu.update(_batch_neupert(sxr_g, hxr_g))
+feats_gpu.update(_batch_hxr_features(hxr_g))
+feats_gpu.update(_batch_pi_channel_features(pi_g))
+torch.cuda.synchronize()
+print(f"  GPU features: {len(feats_gpu)} features, {time.time() - t0:.1f}s", flush=True)
+
+# ═══════════════════════════════════════════════════════════
+# 3. CPU FEATURES
+# ═══════════════════════════════════════════════════════════
+print("Computing CPU features...", flush=True)
+pre = {}
+try:
+    T, EM, chi2 = fit_temperature(pi_sum)
+    pre["sxr_temperature_mk"] = float(T)
+    pre["sxr_emission_measure"] = float(EM)
+    pre["sxr_chi2_red"] = float(chi2) if np.isfinite(chi2) and chi2 < 1e10 else 0.0
+except:
+    pass
+for det, num, key in [
+    ("czt", 1, "hxr_spectral_index_gamma"),
+    ("czt", 2, "hxr_gamma_czt2"),
+    ("cdte", 1, "hxr_gamma_cdte1"),
+    ("cdte", 2, "hxr_gamma_cdte2"),
+]:
+    if f"{det}{num}" in specs:
+        sp = specs[f"{det}{num}"]
+        s = np.nansum(sp["counts"][:100], axis=0)
+        nch = len(s)
+        bp = max(nch // 4, 1)
+        cents = np.array(
+            [30, 50, 70, 115] if det == "czt" else [12, 25, 35, 50], dtype=float
+        )
+        rates = np.array(
+            [np.sum(s[i * bp : (i + 1) * bp]) for i in range(4)], dtype=float
+        )
+        pre[key] = fit_spectral_index(np.maximum(rates, 1e-10), cents)
+try:
+    energies = load_channel_energies()
+    centroids = (energies[0] + energies[1]) / 2.0
+    cdte_avg = np.mean(specs["cdte1"]["counts"], axis=0)
+    cdte_e = np.linspace(5.0, 90.0, len(cdte_avg))
+    valid_pi = pi_sum > 0
+    sep = fit_combined_spectrum(
+        centroids[valid_pi],
+        pi_sum[valid_pi],
+        cdte_e,
+        cdte_avg,
+        t_mk_init=max(pre.get("sxr_temperature_mk", 10.0), 5.0),
+    )
+    pre["nonthermal_gamma"] = sep.get("gamma", 0.0)
+    pre["nonthermal_ec"] = sep.get("ec", 0.0)
+    pre["thermal_fraction"] = float(np.clip(sep.get("thermal_fraction", 0.0), 0.0, 1.0))
+except:
+    pass
+for hk_key, pre_key in [
+    ("czt1temp", "hk_czt1temp"),
+    ("czt2temp", "hk_czt2temp"),
+    ("cdte1temp", "hk_cdte1temp"),
+    ("cdte2temp", "hk_cdte2temp"),
+    ("czthvmon", "hk_czthvmon"),
+    ("cdtehvmon", "hk_cdtehvmon"),
+]:
+    if hk_key in hk and len(hk[hk_key]) > 0:
+        vals = hk[hk_key][np.isfinite(hk[hk_key])]
+        pre[pre_key] = float(np.median(vals)) if len(vals) > 0 else 0.0
+if goes_xrsb_arr is not None:
+    pre["goes_xrsb_flux"] = float(np.nanmax(goes_xrsb_arr))
+    pre["goes_xrsa_flux"] = float(np.nanmax(goes_xrsa_arr))
+    if pre["goes_xrsb_flux"] > 0:
+        pre["goes_xrsa_xrsb_ratio"] = pre["goes_xrsa_flux"] / pre["goes_xrsb_flux"]
+
+# Info theory
+ds2 = 60
+sxr_ds = counts[::ds2].astype(np.float32)
+hxr_ds = hxr4_combined[::ds2, 4].astype(np.float32)
+if len(sxr_ds) > 20:
+    pre["transfer_entropy_hxr_to_sxr"] = float(
+        transfer_entropy(hxr_ds, sxr_ds, k=1, bins=8)
+    )
+    pre["mutual_information_sxr_hxr"] = float(
+        mutual_information(sxr_ds, hxr_ds, bins=8)
+    )
+    pre["sample_entropy_sxr"] = float(sample_entropy(sxr_ds[:200], m=2, r_factor=0.2))
+    lc, ll = lagged_cross_correlation(
+        hxr4_combined[:, 4].astype(np.float32), counts.astype(np.float32), max_lag=100
+    )
+    pre["lagged_cross_corr"] = float(lc) if np.isfinite(lc) else 0.0
+    pre["lagged_cross_corr_lag"] = float(ll)
+
+# QPP
+qpp = detect_qpp(
+    hxr4_combined[:, 4].astype(np.float32), dt=1.0, min_period=10, max_period=300
+)
+pre["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
+pre["qpp_period"] = float(qpp["period"])
+pre["qpp_amplitude"] = float(qpp["amplitude"])
+pre["qpp_significance"] = (
+    float(qpp["significance"]) if np.isfinite(qpp["significance"]) else 0.0
+)
+
+# Granger + mediation
+ds = 10
+dsxr = np.diff(counts[::ds])
+hxr_fb = hxr4_combined[::ds, 4]
+gc = granger_causality_simple(
+    hxr_fb.astype(np.float32), dsxr.astype(np.float32), max_lag=30, n_splits=3
+)
+pre["neupert_granger_improvement"] = float(gc["improvement"])
+pre["neupert_best_lag"] = float(gc["best_lag"])
+hxr_v = hxr4_combined[::ds, 1]
+med_v = hxr4_combined[::ds, 6]
+out_v = counts[::ds]
+valid = np.isfinite(hxr_v) & np.isfinite(med_v) & np.isfinite(out_v)
+if valid.sum() > 50:
+    ma = mediation_analysis(hxr_v[valid], med_v[valid], out_v[valid])
+    pre["max_mediation_proportion"] = ma.get("mediation_proportion", 0.0)
+print(f"  CPU features: {len(pre)} features", flush=True)
+
+# ═══════════════════════════════════════════════════════════
+# 4. FLARE DETECTION
+# ═══════════════════════════════════════════════════════════
+print("Detecting flares...", flush=True)
+flares = detect_flares_adaptive(
+    counts, time_s, min_duration=60, min_peak=100, sigma=3.0
+)
+hxr_czt1 = hxr_all.get("czt1", np.zeros((len(counts), 5)))
+hxr_cdte1 = hxr_all.get("cdte1", np.zeros((len(counts), 5)))
+flares = classify_solexs_helios(flares, hxr_czt1[:, 4], hxr_cdte1[:, 4], time_s)
+print(f"  Detected: {len(flares)} flares", flush=True)
+
+# ═══════════════════════════════════════════════════════════
+# 5. ASSEMBLE MASTER CSV
+# ═══════════════════════════════════════════════════════════
+print("Assembling master CSV...", flush=True)
+canonical = get_canonical_feature_names()
+records = []
+for wi in range(n_w):
+    row = {}
+
+    # Metadata
+    row["window_id"] = wi
+    row["date"] = str(d)
+    row["time_utc"] = utc_times[min(wi * step + lookback, len(utc_times) - 1)].strftime(
+        "%H:%M:%S"
+    )
+    row["time_s"] = float(time_s[min(wi * step + lookback, len(time_s) - 1)])
+
+    # SoLEXS raw
+    row["sxr_peak_window"] = float(np.max(sxr_np[wi]))
+    row["sxr_mean_window"] = float(np.mean(sxr_np[wi]))
+    row["sxr_std_window"] = float(np.std(sxr_np[wi]))
+
+    # GPU features
+    for fi, fn in enumerate(canonical):
+        if (
+            fn in feats_gpu
+            and isinstance(feats_gpu[fn], torch.Tensor)
+            and feats_gpu[fn].shape[0] == n_w
+        ):
+            row[f"gpu_{fn}"] = float(feats_gpu[fn][wi].cpu())
+        elif fn in pre:
+            row[f"gpu_{fn}"] = pre[fn]
+        else:
+            row[f"gpu_{fn}"] = 0.0
+
+    # CPU features
+    for k, v in pre.items():
+        row[f"cpu_{k}"] = v
+
+    # Raw data
+    row["sxr_counts_raw"] = (
+        float(counts_raw[wi * step + lookback])
+        if wi * step + lookback < len(counts_raw)
+        else 0
+    )
+    row["sxr_counts_corrected"] = (
+        float(counts[wi * step + lookback]) if wi * step + lookback < len(counts) else 0
+    )
+    row["hxr_czt1_full"] = (
+        float(hxr_czt1[wi * step + lookback, 4])
+        if wi * step + lookback < len(hxr_czt1)
+        else 0
+    )
+    row["hxr_cdte1_full"] = (
+        float(hxr_cdte1[wi * step + lookback, 4])
+        if wi * step + lookback < len(hxr_cdte1)
+        else 0
+    )
+
+    # Flare detection
+    in_flare = False
+    flare_class = "none"
+    for f in flares:
+        if f["start_idx"] <= wi * step + lookback <= f["end_idx"]:
+            in_flare = True
+            flare_class = f["combined_class"]
+            break
+    row["in_flare"] = int(in_flare)
+    row["flare_class"] = flare_class
+
+    # Day-level constants
+    row["day_sxr_peak"] = float(np.max(counts))
+    row["day_sxr_mean"] = float(np.mean(counts))
+    row["day_goex_flux"] = pre.get("goes_xrsb_flux", 0)
+    row["day_temperature"] = pre.get("sxr_temperature_mk", 0)
+    row["day_gamma_czt1"] = pre.get("hxr_spectral_index_gamma", 0)
+
+    records.append(row)
+
+df = pd.DataFrame(records)
+df.to_csv(OUT / "master_may5_2024.csv", index=False)
+print(f"  Saved: {len(df)} rows × {len(df.columns)} columns", flush=True)
+
+# ═══════════════════════════════════════════════════════════
+# 6. SUMMARY
+# ═══════════════════════════════════════════════════════════
+print(f"\n=== MASTER CSV SUMMARY ===", flush=True)
+print(f"File: {OUT / 'master_may5_2024.csv'}", flush=True)
+print(f"Rows: {len(df)} (windows)", flush=True)
+print(f"Columns: {len(df.columns)}", flush=True)
+print(f"Total size: {df.memory_usage(deep=True).sum() / 1024:.0f} KB", flush=True)
+print(f"Flares in data: {df['in_flare'].sum()} windows", flush=True)
+print(f"X-class windows: {(df['flare_class'] == 'X').sum()}", flush=True)
+print(f"M-class windows: {(df['flare_class'] == 'M').sum()}", flush=True)
+print(f"C-class windows: {(df['flare_class'] == 'C').sum()}", flush=True)
+print(f"Total time: {time.time() - t_total:.1f}s", flush=True)
