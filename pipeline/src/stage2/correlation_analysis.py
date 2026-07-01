@@ -3,12 +3,14 @@ Stage 2 — Correlation Analysis of Feature Matrix.
 Full cross-correlation: Feature × Target + Feature × Feature (multicollinearity).
 Nowcasting targets + Forecasting targets, Spearman rank ρ.
 """
+
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
 from scipy.stats import spearmanr
 from scipy.cluster.hierarchy import linkage, leaves_list
 import warnings
+
 warnings.filterwarnings("ignore")
 
 SRC = Path("dist/stage2_feature_matrix_20260623.npz")
@@ -38,7 +40,9 @@ def _class_to_numeric(c):
     try:
         p = c[0].upper()
         v = float(c[1:])
-        return {"A": v/1000, "B": v/10, "C": v, "M": v*10, "X": v*100}.get(p, 0.0)
+        return {"A": v / 1000, "B": v / 10, "C": v, "M": v * 10, "X": v * 100}.get(
+            p, 0.0
+        )
     except (ValueError, IndexError):
         return 0.0
 
@@ -129,19 +133,41 @@ def load_features():
         features[k] = v
         phase = phase_map.get(k, "unknown")
         # Determine if it's a "flare-internal" feature (only defined during flares)
-        is_flare_internal = any(suffix in k for suffix in [
-            "rise_time", "decay_time", "duration", "t_start", "t_peak", "t_end",
-            "peak_flux", "bg_flux", "max_deriv", "dt_peak", "hxr_fluence",
-            "peak_sxr", "peak_hxr", "T_peak_time", "EM_peak_time", "T_leads_EM",
-            "reale_loop", "qpp_power_preflare", "qpp_power_onset", "qpp_power_decay",
-            "T_MK_solexs", "EM_log10_solexs",
-        ])
-        feature_info.append({
-            "name": k,
-            "phase": phase,
-            "is_flare_internal": is_flare_internal,
-            "dtype": v.dtype.kind,
-        })
+        is_flare_internal = any(
+            suffix in k
+            for suffix in [
+                "rise_time",
+                "decay_time",
+                "duration",
+                "t_start",
+                "t_peak",
+                "t_end",
+                "peak_flux",
+                "bg_flux",
+                "max_deriv",
+                "dt_peak",
+                "hxr_fluence",
+                "peak_sxr",
+                "peak_hxr",
+                "T_peak_time",
+                "EM_peak_time",
+                "T_leads_EM",
+                "reale_loop",
+                "qpp_power_preflare",
+                "qpp_power_onset",
+                "qpp_power_decay",
+                "T_MK_solexs",
+                "EM_log10_solexs",
+            ]
+        )
+        feature_info.append(
+            {
+                "name": k,
+                "phase": phase,
+                "is_flare_internal": is_flare_internal,
+                "dtype": v.dtype.kind,
+            }
+        )
 
     return features, feature_info, meta
 
@@ -188,11 +214,14 @@ def compute_correlations(features, targets, good_mask):
 def plot_target_correlations(rho, pval, feat_names, target_names, feature_info):
     """Figure 1: Feature × Target correlation heatmap."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
 
-    cmap = LinearSegmentedColormap.from_list("rdbu", ["#2166ac", "#f7f7f7", "#b2182b"], N=256)
+    cmap = LinearSegmentedColormap.from_list(
+        "rdbu", ["#2166ac", "#f7f7f7", "#b2182b"], N=256
+    )
 
     # Sort features by max absolute correlation across targets
     max_abs_rho = np.nanmax(np.abs(rho), axis=1)
@@ -223,14 +252,26 @@ def plot_target_correlations(rho, pval, feat_names, target_names, feature_info):
             sig = pval_s[i, j] < 0.001
             val = rho_s[i, j]
             color = "white" if abs(val) > 0.3 else "#888"
-            ax.text(j, i, f"{val:.2f}" + ("*" if sig else ""),
-                    ha="center", va="center", fontsize=5.5, color=color)
+            ax.text(
+                j,
+                i,
+                f"{val:.2f}" + ("*" if sig else ""),
+                ha="center",
+                va="center",
+                fontsize=5.5,
+                color=color,
+            )
 
     ax.set_xticks(range(n_targ))
     ax.set_xticklabels(target_names, rotation=30, ha="right", fontsize=8, color="#ccc")
     ax.set_yticks(range(n_show))
     ax.set_yticklabels(feat_s, fontsize=5.5, color="#ccc")
-    ax.set_title("Feature × Target Spearman ρ (GOOD bins only)", color="white", fontsize=11, pad=10)
+    ax.set_title(
+        "Feature × Target Spearman ρ (GOOD bins only)",
+        color="white",
+        fontsize=11,
+        pad=10,
+    )
 
     plt.colorbar(im, ax=ax, label="ρ", shrink=0.6)
     for s in ax.spines.values():
@@ -246,6 +287,7 @@ def plot_target_correlations(rho, pval, feat_names, target_names, feature_info):
 def plot_top_features(rho, pval, feat_names, target_names, feature_info):
     """Figure 2: Top-20 features for nowcast (y_in_flare) and forecast (y_flare_30m)."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -267,8 +309,10 @@ def plot_top_features(rho, pval, feat_names, target_names, feature_info):
 
     phase_map_info = {fi["name"]: fi["phase"] for fi in feature_info}
 
-    for ax, top, title in [(ax1, top_now, "Top-20 NOWCAST (y_in_flare)"),
-                            (ax2, top_fc, "Top-20 FORECAST (y_flare_30m)")]:
+    for ax, top, title in [
+        (ax1, top_now, "Top-20 NOWCAST (y_in_flare)"),
+        (ax2, top_fc, "Top-20 FORECAST (y_flare_30m)"),
+    ]:
         ax.set_facecolor("#1a1a2e")
         names = [t[0] for t in top][::-1]
         vals = [t[1] for t in top][::-1]
@@ -285,17 +329,29 @@ def plot_top_features(rho, pval, feat_names, target_names, feature_info):
 
         # Annotate value
         for i, v in enumerate(vals):
-            ax.text(v + 0.01 if v >= 0 else v - 0.05, i, f"{v:.3f}",
-                    fontsize=6, color="#aaa", va="center")
+            ax.text(
+                v + 0.01 if v >= 0 else v - 0.05,
+                i,
+                f"{v:.3f}",
+                fontsize=6,
+                color="#aaa",
+                va="center",
+            )
 
         for s in ax.spines.values():
             s.set_color("#444")
 
     # Legend for phases
     from matplotlib.patches import Patch
+
     legend_elements = [Patch(facecolor=c, label=p) for p, c in PHASE_COLORS.items()]
-    fig.legend(handles=legend_elements, loc="lower center", fontsize=7, ncol=4,
-               bbox_to_anchor=(0.5, -0.02))
+    fig.legend(
+        handles=legend_elements,
+        loc="lower center",
+        fontsize=7,
+        ncol=4,
+        bbox_to_anchor=(0.5, -0.02),
+    )
 
     plt.tight_layout(rect=[0, 0.06, 1, 1])
     plt.savefig(FIG_TOPS, dpi=150, facecolor="#0d0d1a", bbox_inches="tight")
@@ -305,9 +361,10 @@ def plot_top_features(rho, pval, feat_names, target_names, feature_info):
     return top_now, top_fc
 
 
-def plot_feature_feature_correlation(features, feature_info, good_mask, max_show=60):
+def plot_feature_feature_correlation(features, feature_info, good_mask, max_show=30):
     """Figure 3: Feature × Feature Spearman ρ (multicollinearity heatmap)."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
@@ -347,32 +404,56 @@ def plot_feature_feature_correlation(features, feature_info, good_mask, max_show
     rho_ff_ord = rho_ff[order][:, order]
     names_ord = [names[i] for i in order]
 
-    # FIGURE
-    fig, ax = plt.subplots(figsize=(18, 17))
+    # FIGURE — limit size to avoid "Image size too large" error
+    figsize_h = min(17, n_show * 0.45 + 2)
+    fig, ax = plt.subplots(figsize=(18, figsize_h))
     fig.patch.set_facecolor("#0d0d1a")
     ax.set_facecolor("#1a1a2e")
 
-    cmap = LinearSegmentedColormap.from_list("rdbu", ["#2166ac", "#f7f7f7", "#b2182b"], N=256)
+    cmap = LinearSegmentedColormap.from_list(
+        "rdbu", ["#2166ac", "#f7f7f7", "#b2182b"], N=256
+    )
     im = ax.imshow(rho_ff_ord, cmap=cmap, vmin=-1, vmax=1)
 
     # Phase color bar on left side
-    phase_order = [next((fi["phase"] for fi in feature_info if fi["name"] == n), "unknown")
-                   for n in names_ord]
+    phase_order = [
+        next((fi["phase"] for fi in feature_info if fi["name"] == n), "unknown")
+        for n in names_ord
+    ]
     phase_colors = [PHASE_COLORS.get(p, "#444") for p in phase_order]
     for i, c in enumerate(phase_colors):
-        ax.barh(i, 0.3, height=0.8, left=-0.35, color=c, transform=ax.get_yaxis_transform(),
-                clip_on=False, align="center")
+        ax.barh(
+            i,
+            0.3,
+            height=0.8,
+            left=-0.35,
+            color=c,
+            transform=ax.get_yaxis_transform(),
+            clip_on=False,
+            align="center",
+        )
 
     # Color stripe along the top for column phases (using scatter with squares)
     for j, c in enumerate(phase_colors):
-        ax.plot(j, n_show + 0.5, marker="s", color=c, markersize=6,
-                transform=ax.get_xaxis_transform(), clip_on=False)
+        ax.plot(
+            j,
+            n_show + 0.5,
+            marker="s",
+            color=c,
+            markersize=6,
+            transform=ax.get_xaxis_transform(),
+            clip_on=False,
+        )
 
     ax.set_xticks(range(n_show))
     ax.set_yticks(range(n_show))
     ax.set_xticklabels(names_ord, rotation=90, fontsize=4, color="#aaa")
     ax.set_yticklabels(names_ord, fontsize=4, color="#aaa")
-    ax.set_title("Feature × Feature Spearman ρ (hierarchically clustered)", color="white", fontsize=10)
+    ax.set_title(
+        "Feature × Feature Spearman ρ (hierarchically clustered)",
+        color="white",
+        fontsize=10,
+    )
 
     plt.colorbar(im, ax=ax, label="ρ", shrink=0.4, pad=0.02)
     for s in ax.spines.values():
@@ -402,14 +483,16 @@ def print_top_table(top_now, top_fc):
     print("\n" + "=" * 80)
     print("TOP-15 FEATURES: NOWCAST vs FORECAST")
     print("=" * 80)
-    print(f"{'#':<4} {'NOWCAST (y_in_flare)':<40s} {'ρ':<8} {'|':<3} {'FORECAST (y_flare_30m)':<40s} {'ρ':<8}")
+    print(
+        f"{'#':<4} {'NOWCAST (y_in_flare)':<40s} {'ρ':<8} {'|':<3} {'FORECAST (y_flare_30m)':<40s} {'ρ':<8}"
+    )
     print("-" * 80)
     for i in range(max(len(top_now), len(top_fc))):
         n = top_now[i] if i < len(top_now) else ("---", np.nan, np.nan)
         f = top_fc[i] if i < len(top_fc) else ("---", np.nan, np.nan)
         nr = f"{n[1]:.4f}" if not np.isnan(n[1]) else "---"
         fr = f"{f[1]:.4f}" if not np.isnan(f[1]) else "---"
-        print(f"{i+1:<4} {n[0]:<40s} {nr:<8} {'|':<3} {f[0]:<40s} {fr:<8}")
+        print(f"{i + 1:<4} {n[0]:<40s} {nr:<8} {'|':<3} {f[0]:<40s} {fr:<8}")
 
 
 def main():
@@ -419,12 +502,16 @@ def main():
 
     targets, good_mask, meta = build_targets()
     features, feature_info, _ = load_features()
-    rho, pval, feat_names, target_names, valid_count = compute_correlations(features, targets, good_mask)
+    rho, pval, feat_names, target_names, valid_count = compute_correlations(
+        features, targets, good_mask
+    )
 
     # Plots
     print("\nGenerating plots...")
     plot_target_correlations(rho, pval, feat_names, target_names, feature_info)
-    top_now, top_fc = plot_top_features(rho, pval, feat_names, target_names, feature_info)
+    top_now, top_fc = plot_top_features(
+        rho, pval, feat_names, target_names, feature_info
+    )
     feat_ord = plot_feature_feature_correlation(features, feature_info, good_mask)
     print_top_table(top_now, top_fc)
 
@@ -435,14 +522,37 @@ def main():
 
     # Best nowcast features (excluding flare-internal)
     ti = target_names.index("y_in_flare")
-    ext_feats = [(feat_names[i], rho[i, ti], pval[i, ti])
-                 for i in range(len(feat_names))
-                 if not any(s in feat_names[i] for s in
-                            ["rise_time", "decay_time", "duration", "t_start", "t_peak", "t_end",
-                             "peak_flux", "bg_flux", "max_deriv", "dt_peak", "hxr_fluence",
-                             "peak_sxr", "peak_hxr", "T_peak_time", "EM_peak_time", "T_leads_EM",
-                             "reale_loop", "T_MK_solexs", "EM_log10_solexs", "qpp_power_pre",
-                             "qpp_power_on", "qpp_power_dec"])]
+    ext_feats = [
+        (feat_names[i], rho[i, ti], pval[i, ti])
+        for i in range(len(feat_names))
+        if not any(
+            s in feat_names[i]
+            for s in [
+                "rise_time",
+                "decay_time",
+                "duration",
+                "t_start",
+                "t_peak",
+                "t_end",
+                "peak_flux",
+                "bg_flux",
+                "max_deriv",
+                "dt_peak",
+                "hxr_fluence",
+                "peak_sxr",
+                "peak_hxr",
+                "T_peak_time",
+                "EM_peak_time",
+                "T_leads_EM",
+                "reale_loop",
+                "T_MK_solexs",
+                "EM_log10_solexs",
+                "qpp_power_pre",
+                "qpp_power_on",
+                "qpp_power_dec",
+            ]
+        )
+    ]
     ext_feats.sort(key=lambda x: -abs(x[1]))
     print("\nTop-10 NOWCAST features (non-flare-internal):")
     for name, r, p in ext_feats[:10]:
@@ -451,8 +561,11 @@ def main():
 
     # Best forecast features
     ti_fc = target_names.index("y_flare_30m")
-    fc_feats = [(feat_names[i], rho[i, ti_fc], pval[i, ti_fc])
-                for i in range(len(feat_names)) if not np.isnan(rho[i, ti_fc])]
+    fc_feats = [
+        (feat_names[i], rho[i, ti_fc], pval[i, ti_fc])
+        for i in range(len(feat_names))
+        if not np.isnan(rho[i, ti_fc])
+    ]
     fc_feats.sort(key=lambda x: -abs(x[1]))
     print("\nTop-10 FORECAST features (y_flare_30m):")
     for name, r, p in fc_feats[:10]:

@@ -2,6 +2,7 @@
 Stage 2 — Phase 6: HEL1OS spectral index (#17, #18, #19).
 Fit power-law to HEL1OS CdTe spectra, interpolate to 1s grid.
 """
+
 import numpy as np
 from pathlib import Path
 from astropy.io import fits
@@ -9,8 +10,9 @@ from scipy.optimize import curve_fit
 from scipy.interpolate import interp1d
 
 STAGE1 = Path("data/processed/stage1_20260623.npz")
-CDTE1 = Path("data/raw/hel1os/20260623/cdte/hel1os_cdte_spectra_cdte1.fits")
-CDTE2 = Path("data/raw/hel1os/20260623/cdte/hel1os_cdte_spectra_cdte2.fits")
+# HEL1OS CdTe spectra are stored in data/processed/hel1os/YYYY/MM/DD/
+CDTE1 = Path("../data/processed/hel1os/2026/06/23/hel1os_cdte_spectra_cdte1.fits")
+CDTE2 = Path("../data/processed/hel1os/2026/06/23/hel1os_cdte_spectra_cdte2.fits")
 OUT_DIR = Path("dist/features")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 OUT_PATH = OUT_DIR / "phase6_spectral_index.npz"
@@ -63,7 +65,9 @@ def extract():
             continue
         try:
             popt, _ = curve_fit(
-                power_law, E_fit[good], ct_fit[good],
+                power_law,
+                E_fit[good],
+                ct_fit[good],
                 p0=(100, 3.0),
                 bounds=([1e-10, 0.5], [1e10, 10.0]),
                 maxfev=2000,
@@ -82,12 +86,20 @@ def extract():
     if n_good > 3:
         good_i = np.where(~np.isnan(delta_arr))[0]
         # Check that times are in range
-        print(f"  t_mid_unix range: {t_mid_unix[good_i[0]]:.0f} - {t_mid_unix[good_i[-1]]:.0f}")
+        print(
+            f"  t_mid_unix range: {t_mid_unix[good_i[0]]:.0f} - {t_mid_unix[good_i[-1]]:.0f}"
+        )
         print(f"  target t_unix range: {t_unix[0]:.0f} - {t_unix[-1]:.0f}")
-        if t_mid_unix[good_i[0]] > t_unix[0] - 100 and t_mid_unix[good_i[-1]] < t_unix[-1] + 100:
+        if (
+            t_mid_unix[good_i[0]] > t_unix[0] - 100
+            and t_mid_unix[good_i[-1]] < t_unix[-1] + 100
+        ):
             f_delta = interp1d(
-                t_mid_unix[good_i], delta_arr[good_i],
-                kind="linear", bounds_error=False, fill_value=np.nan
+                t_mid_unix[good_i],
+                delta_arr[good_i],
+                kind="linear",
+                bounds_error=False,
+                fill_value=np.nan,
             )
             delta_1s = f_delta(t_unix).astype(np.float32)
         else:
@@ -110,8 +122,8 @@ def extract():
     half = window // 2
     for i in range(half, n - half):
         if g[i] and ~np.isnan(hxr_flux[i]) and hxr_flux[i] > 0:
-            seg_d = delta_1s[i - half:i + half + 1]
-            seg_f = hxr_flux[i - half:i + half + 1]
+            seg_d = delta_1s[i - half : i + half + 1]
+            seg_f = hxr_flux[i - half : i + half + 1]
             good2 = ~(np.isnan(seg_d) | np.isnan(seg_f) | (seg_f <= 0))
             if good2.sum() > 5:
                 cmat = np.corrcoef(seg_d[good2], np.log(seg_f[good2]))

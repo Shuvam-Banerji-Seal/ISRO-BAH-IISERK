@@ -4,6 +4,7 @@ Accumulate PI spectra per flare window, fold through ARF+RMF, fit isothermal mod
 
 Output per-flare T and EM to compare with GOES-derived values.
 """
+
 import gzip
 import numpy as np
 from pathlib import Path
@@ -12,9 +13,13 @@ from scipy.optimize import curve_fit
 from datetime import datetime, timezone
 
 STAGE1 = Path("data/processed/stage1_20260623.npz")
-PI_RAW = Path("data/raw/solexs/20260623/SDD2/AL1_SOLEXS_20260623_SDD2_L1.pi.gz")
-ARF = Path("data/raw/caldb/solexs_tools-1.1/CALDB/arf/solexs_arf_SDD2_v1.arf")
-RMF = Path("data/raw/caldb/solexs_tools-1.1/CALDB/response/rmf/solexs_gaussian_SDD2_v1.rmf")
+# SoLEXS PI data - not available for 20260623 (last SoLEXS day is 20260622)
+# Use 20260622 as nearest substitute if available
+PI_RAW = Path("../data/processed/solexs/2026/06/22/SDD2/AL1_SOLEXS_20260622_SDD2_L1.pi")
+ARF = Path("../data/external/solexs_caldb/CALDB/arf/solexs_arf_SDD2_v1.arf")
+RMF = Path(
+    "../data/external/solexs_caldb/CALDB/response/rmf/solexs_gaussian_SDD2_v1.rmf"
+)
 OUT_DIR = Path("dist/features")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 OUT_PATH = OUT_DIR / "phase4_tem_solexs.npz"
@@ -26,17 +31,42 @@ KB = 8.617333262e-2  # keV per MK (1 MK = 8.6e-2 keV)
 
 
 def load_pi_data():
-    """Load PI COUNTS array and time info."""
-    print("  Loading PI data...")
-    with gzip.open(PI_RAW, "rb") as f:
-        with fits.open(f) as h:
-            data = h[1].data
-            counts = np.array(data["COUNTS"], dtype=np.float64)
-            exposure = data["EXPOSURE"].astype(np.float64) if "EXPOSURE" in data.columns.names else np.ones(86400)
-    # TSTART[0] gives Unix time of the first bin
-    with gzip.open(PI_RAW, "rb") as f:
-        with fits.open(f) as h:
-            t0_unix = float(h[1].data["TSTART"][0])
+    """Load PI COUNTS array and time info.
+    Handles both .pi (uncompressed) and .pi.gz (gzip compressed) files.
+    Returns (counts, pi_time, exposure) or raises FileNotFoundError.
+    """
+    pi_path = PI_RAW.resolve()
+    if not pi_path.exists():
+        # Try .pi.gz variant
+        pi_path_gz = pi_path.parent / (pi_path.name + ".gz")
+        if pi_path_gz.exists():
+            pi_path = pi_path_gz
+        else:
+            raise FileNotFoundError(f"PI file not found: {pi_path} or {pi_path_gz}")
+
+    print(f"  Loading PI data from: {pi_path}")
+
+    def _open_fits(path):
+        if str(path).endswith(".gz"):
+            import gzip
+
+            return fits.open(gzip.open(path, "rb"))
+        return fits.open(path)
+
+    with _open_fits(pi_path) as h:
+        data = h[1].data
+        counts = np.array(data["COUNTS"], dtype=np.float64)
+        exposure = (
+            data["EXPOSURE"].astype(np.float64)
+            if "EXPOSURE" in data.columns.names
+            else np.ones(86400)
+        )
+        t0_unix = (
+            float(data["TSTART"][0])
+            if "TSTART" in data.columns.names
+            else float(h[1].header.get("TSTART", 0))
+        )
+
     pi_time = t0_unix + np.arange(86400, dtype=np.float64)
     print(f"  Loaded: {counts.shape}, t0_unix={t0_unix}")
     print(f"  PI time range: {pi_time[0]} - {pi_time[-1]}")
@@ -67,6 +97,7 @@ def channel_to_energy(ch, emin, emax):
 def interpolate_arf_to_channels(energy_centers, arf_elo, arf_specresp):
     """Interpolate ARF from 2250 energy bins onto 340 PI channel centers."""
     from scipy.interpolate import interp1d
+
     arf_mid = (arf_elo[1:] + arf_elo[:-1]) / 2
     # Actually, ARF energy bins are 0.01 keV wide, use bin centers
     arf_e = arf_elo + 0.005  # 0.01 keV bins centered
@@ -97,7 +128,9 @@ def fit_isothermal(energy, counts, arf_at_channels, dE_channels, p0=(10.0, 10.0)
 
     Returns (T_MK, EM, T_err, EM_err) or (nan, nan, nan, nan) on failure.
     """
-    good = (arf_at_channels > 1e-6) & (counts >= 0) & ~np.isnan(counts) & (dE_channels > 0)
+    good = (
+        (arf_at_channels > 1e-6) & (counts >= 0) & ~np.isnan(counts) & (dE_channels > 0)
+    )
     if good.sum() < 10:
         return np.nan, np.nan, np.nan, np.nan
 
@@ -111,7 +144,9 @@ def fit_isothermal(energy, counts, arf_at_channels, dE_channels, p0=(10.0, 10.0)
 
     try:
         popt, pcov = curve_fit(
-            model, E_fit, cnt_fit,
+            model,
+            E_fit,
+            cnt_fit,
             p0=p0,
             bounds=([1.0, 1e-10], [100.0, 1e10]),
             maxfev=10000,
@@ -127,13 +162,40 @@ def extract():
     ds1 = np.load(STAGE1, allow_pickle=True)
     flare_id = ds1["flare_id"]
     time = ds1["time"].astype(np.float64)
-    goes_T = ds1.get("goes_temperature_MK",
-                     np.full(86400, np.nan, dtype=np.float32))
-    goes_EM = ds1.get("goes_emission_measure_log10",
-                      np.full(86400, np.nan, dtype=np.float32))
+    goes_T = ds1.get("goes_temperature_MK", np.full(86400, np.nan, dtype=np.float32))
+    goes_EM = ds1.get(
+        "goes_emission_measure_log10", np.full(86400, np.nan, dtype=np.float32)
+    )
 
-    # Load PI, ARF, RMF
-    counts_pi, pi_time, exposure = load_pi_data()
+    # Load PI data — gracefully handle missing file
+    try:
+        counts_pi, pi_time, exposure = load_pi_data()
+    except (FileNotFoundError, OSError) as e:
+        print(f"  PI data not available: {e}")
+        print("  → Skipping Phase 4 (SoLEXS PI data required for T/EM fitting)")
+        # Create empty output with all-NaN features
+        features = {
+            "T_MK_solexs_pi": np.full(86400, np.nan, dtype=np.float32),
+            "EM_log10_solexs_pi": np.full(86400, np.nan, dtype=np.float32),
+            "T_diff_GOES_minus_SoLEXS": np.full(86400, np.nan, dtype=np.float32),
+        }
+        metadata = {
+            "n_features": 3,
+            "feature_names": list(features.keys()),
+            "phase": 4,
+            "n_flares_fitted": 0,
+            "flare_results": {},
+            "method": "SKIPPED — PI data not available",
+            "source": str(PI_RAW),
+            "skip_reason": str(e),
+        }
+        for k, v in features.items():
+            nnan = int(np.isnan(v).sum()) if v.dtype.kind == "f" else 0
+            metadata[f"{k}_nan"] = nnan
+        np.savez_compressed(OUT_PATH, **features, __metadata__=metadata)
+        print(f"  Saved empty Phase 4 -> {OUT_PATH}")
+        return features
+
     arf_elo, arf_ehi, arf_specresp, channels, emin, emax, dE = load_arf_rmf()
 
     # Energy centers for each channel
@@ -154,9 +216,11 @@ def extract():
         idx = np.where(mask)[0]
         t0_flare = time[idx[0]]
         t1_flare = time[idx[-1]]
-        print(f"\n  Flare {fid}: {len(idx)} bins, "
-              f"{datetime.fromtimestamp(t0_flare, tz=timezone.utc)} - "
-              f"{datetime.fromtimestamp(t1_flare, tz=timezone.utc)}")
+        print(
+            f"\n  Flare {fid}: {len(idx)} bins, "
+            f"{datetime.fromtimestamp(t0_flare, tz=timezone.utc)} - "
+            f"{datetime.fromtimestamp(t1_flare, tz=timezone.utc)}"
+        )
 
         # Find corresponding PI bins
         pi_idx = np.where((pi_time >= t0_flare) & (pi_time <= t1_flare))[0]
@@ -180,7 +244,9 @@ def extract():
         dE_v = dE[valid_channels]
 
         # Fit isothermal model to accumulated counts
-        T_fit, norm_fit, T_err, norm_err = fit_isothermal(E, channel_counts, arf_v, dE_v)
+        T_fit, norm_fit, T_err, norm_err = fit_isothermal(
+            E, channel_counts, arf_v, dE_v
+        )
 
         if not np.isnan(T_fit):
             # Calibrate EM against GOES: scale factor = 9e12 found empirically
@@ -188,7 +254,9 @@ def extract():
             EM_SCALE = 9.0e12  # calibration factor against GOES EM
             d_cm = 1.496e13
             EM_fit = norm_fit * 4 * np.pi * d_cm**2 * EM_SCALE
-            print(f"    T={T_fit:.1f}±{T_err:.1f} MK, norm={norm_fit:.2e}, EM={EM_fit:.2e} cm^-3")
+            print(
+                f"    T={T_fit:.1f}±{T_err:.1f} MK, norm={norm_fit:.2e}, EM={EM_fit:.2e} cm^-3"
+            )
             print(f"    GOES T ~ {np.nanmedian(goes_T[idx]):.1f} MK")
         else:
             EM_fit = np.nan
@@ -210,7 +278,11 @@ def extract():
     for fid, res in flare_results.items():
         mask = flare_id == fid
         T_solexs[mask] = res["T_MK_solexs"]
-        EM_solexs[mask] = np.log10(res["EM_solexs"] + 1e-10) if not np.isnan(res["EM_solexs"]) else np.nan
+        EM_solexs[mask] = (
+            np.log10(res["EM_solexs"] + 1e-10)
+            if not np.isnan(res["EM_solexs"])
+            else np.nan
+        )
 
     features["T_MK_solexs_pi"] = T_solexs
     features["EM_log10_solexs_pi"] = EM_solexs
@@ -230,8 +302,12 @@ def extract():
         nnan = int(np.isnan(v).sum()) if v.dtype.kind == "f" else 0
         metadata[f"{k}_nan"] = nnan
         if v.dtype.kind == "f":
-            metadata[f"{k}_min"] = float(np.nanmin(v)) if np.any(~np.isnan(v)) else np.nan
-            metadata[f"{k}_max"] = float(np.nanmax(v)) if np.any(~np.isnan(v)) else np.nan
+            metadata[f"{k}_min"] = (
+                float(np.nanmin(v)) if np.any(~np.isnan(v)) else np.nan
+            )
+            metadata[f"{k}_max"] = (
+                float(np.nanmax(v)) if np.any(~np.isnan(v)) else np.nan
+            )
 
     np.savez_compressed(OUT_PATH, **features, __metadata__=metadata)
     print(f"\nPhase 4 done -> {OUT_PATH}")

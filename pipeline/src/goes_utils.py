@@ -3,7 +3,9 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
 
-GOES_DATA_DIR = Path(__file__).parent.parent / "data/raw/goes"
+# GOES data is stored in the main repo's external directory
+GOES_DATA_DIR = Path(__file__).parent.parent.parent / "data/external/goes"
+
 
 def _norm_date(d):
     if isinstance(d, int):
@@ -13,26 +15,31 @@ def _norm_date(d):
         return s
     raise ValueError(f"Can't parse date: {d}")
 
+
 def _find_file(date, resolution="avg1m"):
     dstr = _norm_date(date)
     pat = f"*{resolution}*{dstr}*.nc"
     files = sorted(GOES_DATA_DIR.glob(pat))
     if not files:
-        raise FileNotFoundError(f"No GOES file for {dstr} {resolution} in {GOES_DATA_DIR}")
+        raise FileNotFoundError(
+            f"No GOES file for {dstr} {resolution} in {GOES_DATA_DIR}"
+        )
     return files[0]
+
 
 def _cls_str(f):
     if np.isnan(f):
         return "---"
     if f >= 1e-4:
-        return f"X{f/1e-4:.1f}"
+        return f"X{f / 1e-4:.1f}"
     if f >= 1e-5:
-        return f"M{f/1e-5:.1f}"
+        return f"M{f / 1e-5:.1f}"
     if f >= 1e-6:
-        return f"C{f/1e-6:.1f}"
+        return f"C{f / 1e-6:.1f}"
     if f >= 1e-7:
-        return f"B{f/1e-7:.1f}"
-    return f"A{f/1e-8:.2f}"
+        return f"B{f / 1e-7:.1f}"
+    return f"A{f / 1e-8:.2f}"
+
 
 class GOESData:
     def __init__(self, date, resolution="avg1m"):
@@ -54,8 +61,7 @@ class GOESData:
     def __repr__(self):
         n = len(self.time)
         c = self.class_str(self.xrsb[np.nanargmax(self.xrsb)])
-        return (f"GOESData({self.date}, {self.resolution}): "
-                f"{n} samples, peak {c}")
+        return f"GOESData({self.date}, {self.resolution}): {n} samples, peak {c}"
 
     @staticmethod
     def class_str(flux):
@@ -86,8 +92,10 @@ class GOESData:
     def __exit__(self, *args):
         self.close()
 
+
 def load_goes(date, resolution="avg1m"):
     return GOESData(date, resolution)
+
 
 def demo():
     for day in [16, 21, 23]:
@@ -99,6 +107,7 @@ def demo():
                 g.close()
             except FileNotFoundError:
                 print(f"  No GOES {res} for day {day}")
+
 
 if __name__ == "__main__":
     demo()

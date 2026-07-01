@@ -37,22 +37,25 @@ import warnings
 # FLAG SCHEMA
 # ================================================================
 FLAGS = {
-    0: 'GOOD',
-    1: 'GTI_GAP',
-    2: 'HXR_NO_DATA',
-    3: 'SAA',
-    4: 'PARTICLE_EVENT',
-    5: 'SATURATED',
-    6: 'INSTRUMENTAL',
-    7: 'MARGINAL',
+    0: "GOOD",
+    1: "GTI_GAP",
+    2: "HXR_NO_DATA",
+    3: "SAA",
+    4: "PARTICLE_EVENT",
+    5: "SATURATED",
+    6: "INSTRUMENTAL",
+    7: "MARGINAL",
 }
 
 
 def load_stage0(path=None):
     if path is None:
         path = "data/processed/master_dataset_20260623.npz"
+    elif not Path(path).exists():
+        # Try pipeline data/processed/
+        path = f"data/processed/{Path(path).name}"
     ds = np.load(path, allow_pickle=True)
-    meta = ds['__metadata__'].item()
+    meta = ds["__metadata__"].item()
     return ds, meta
 
 
@@ -71,13 +74,13 @@ def consolidate_flags(ds):
 
     Returns master_flag (int16 array), decoded_flag (str array).
     """
-    N = len(ds['time'])
+    N = len(ds["time"])
     f = np.zeros(N, dtype=np.int16)
 
-    sxr_q = ds['sxr_quality'].astype(int)
-    hxr_q = ds['hxr_quality'].astype(int)
-    gt = ds['gap_type'].astype(int)
-    is_saa = ds['is_saa']
+    sxr_q = ds["sxr_quality"].astype(int)
+    hxr_q = ds["hxr_quality"].astype(int)
+    gt = ds["gap_type"].astype(int)
+    is_saa = ds["is_saa"]
 
     # SAA
     f[is_saa] = 3
@@ -94,7 +97,7 @@ def consolidate_flags(ds):
     # Default: GOOD
     f[(f == 0)] = 0
 
-    decoded = np.array([FLAGS.get(int(v), 'UNKNOWN') for v in f])
+    decoded = np.array([FLAGS.get(int(v), "UNKNOWN") for v in f])
     return f, decoded
 
 
@@ -118,10 +121,10 @@ def detect_particle_events(sxr_flux, hxr_flux, master_flag, t, n_sigma=5, width_
     hxr_clean = np.where(np.isnan(hxr_flux), 0, hxr_flux)
     peaks, props = signal.find_peaks(hxr_clean, prominence=5)
     narrow_peaks = np.zeros(N, dtype=bool)
-    if len(peaks) > 0 and 'widths' in props:
-        for pi, wi in zip(peaks, props['widths']):
+    if len(peaks) > 0 and "widths" in props:
+        for pi, wi in zip(peaks, props["widths"]):
             if wi < width_max:
-                narrow_peaks[max(0, pi - 1):min(N, pi + 2)] = True
+                narrow_peaks[max(0, pi - 1) : min(N, pi + 2)] = True
 
     # Combined candidates: SXR gradient outlier AND (HXR flat or no HXR)
     hxr_present = ~np.isnan(hxr_flux)
@@ -185,7 +188,9 @@ def detect_saturation(flux, name="", quantile_thresh=0.99):
     return ceiling, saturated
 
 
-def estimate_background_multiscale(flux, master_flag, t, long_window=3600, short_window=600):
+def estimate_background_multiscale(
+    flux, master_flag, t, long_window=3600, short_window=600
+):
     """1.5 — Multi-timescale background estimation.
 
     Long-term trend: rolling median on low-flux GOOD samples (~1hr window).
@@ -208,7 +213,9 @@ def estimate_background_multiscale(flux, master_flag, t, long_window=3600, short
 
     # 1.5a: Long-term trend — rolling median (handles NaN-filled data robustly)
     half_long = long_window // 2
-    long_trend = median_filter(flux_clean, size=long_window, mode='reflect').astype(np.float64)
+    long_trend = median_filter(flux_clean, size=long_window, mode="reflect").astype(
+        np.float64
+    )
     # Replace trend with NaN where not GOOD, then interpolate
     long_trend[~good] = np.nan
     # Fill NaN gaps with nearest good value
@@ -225,8 +232,8 @@ def estimate_background_multiscale(flux, master_flag, t, long_window=3600, short
 
     half_short = short_window // 2
     for i in range(half_short, N - half_short):
-        seg = residual[i - half_short:i + half_short + 1]
-        seg_good = good[i - half_short:i + half_short + 1]
+        seg = residual[i - half_short : i + half_short + 1]
+        seg_good = good[i - half_short : i + half_short + 1]
         if seg_good.sum() >= 5:
             short_bg[i] = np.percentile(seg[seg_good], 10)
 
@@ -235,7 +242,7 @@ def estimate_background_multiscale(flux, master_flag, t, long_window=3600, short
         first_valid = int(np.where(~np.isnan(short_bg))[0][0])
         last_valid = int(np.where(~np.isnan(short_bg))[0][-1])
         short_bg[:first_valid] = short_bg[first_valid]
-        short_bg[last_valid + 1:] = short_bg[last_valid]
+        short_bg[last_valid + 1 :] = short_bg[last_valid]
     short_bg = np.where(np.isnan(short_bg), 0, short_bg)
 
     # Combine
@@ -243,7 +250,12 @@ def estimate_background_multiscale(flux, master_flag, t, long_window=3600, short
     bg[~good] = np.nan
 
     # bg_sigma from quiet-sample scatter around combined background
-    quiet = good & ~np.isnan(bg) & (flux_clean < bg) & ((bg - flux_clean) < 0.05 * np.nanmean(bg[good]) + 1e-10)
+    quiet = (
+        good
+        & ~np.isnan(bg)
+        & (flux_clean < bg)
+        & ((bg - flux_clean) < 0.05 * np.nanmean(bg[good]) + 1e-10)
+    )
     if quiet.sum() > 10:
         scatter = flux_clean[quiet] - bg[quiet]
         sigma_val = np.nanstd(scatter)
@@ -274,7 +286,7 @@ def goes_cross_calibration(sxr_counts, goes_flux, master_flag, t):
     goes_q = goes_flux[quiet]
 
     slope, intercept, r_val, p_val, se = linregress(sxr_q, goes_q)
-    r2 = r_val ** 2
+    r2 = r_val**2
 
     # Regression: goes_flux = slope * sxr_counts + intercept
     # So calibrated SoLEXS flux = slope * sxr_counts + intercept
@@ -296,21 +308,21 @@ def run_stage1(date_str="20260623", master_path=None):
 
     # Load Stage 0
     ds, meta = load_stage0(master_path)
-    t = ds['time'].astype(np.float64)
+    t = ds["time"].astype(np.float64)
     N = len(t)
 
-    sxr_flux = ds['sxr_flux'].astype(np.float64)
-    sxr_counts = ds['sxr_counts'].astype(np.float64)
-    hxr_flux = ds['hxr_flux'].astype(np.float64)
-    goes_flux = ds['goes_flux'].astype(np.float64)
+    sxr_flux = ds["sxr_flux"].astype(np.float64)
+    sxr_counts = ds["sxr_counts"].astype(np.float64)
+    hxr_flux = ds["hxr_flux"].astype(np.float64)
+    goes_flux = ds["goes_flux"].astype(np.float64)
 
     # Sub-band loaded for per-band background
     hxr_bands = {
-        'cdte1': ds['hxr_cdte_band1'].astype(np.float64),
-        'cdte2': ds['hxr_cdte_band2'].astype(np.float64),
-        'cdte3': ds['hxr_cdte_band3'].astype(np.float64),
-        'cdte4': ds['hxr_cdte_band4'].astype(np.float64),
-        'czt_full': ds['hxr_czt_full'].astype(np.float64),
+        "cdte1": ds["hxr_cdte_band1"].astype(np.float64),
+        "cdte2": ds["hxr_cdte_band2"].astype(np.float64),
+        "cdte3": ds["hxr_cdte_band3"].astype(np.float64),
+        "cdte4": ds["hxr_cdte_band4"].astype(np.float64),
+        "czt_full": ds["hxr_czt_full"].astype(np.float64),
     }
 
     # ================================================================
@@ -339,7 +351,9 @@ def run_stage1(date_str="20260623", master_path=None):
     saturated = sxr_sat | hxr_sat
     n_sat = int(np.sum(saturated))
     master_flag[saturated] = np.maximum(master_flag[saturated], 5)
-    print(f"  SXR ceiling: {sxr_ceiling:.0f} cts/s  HXR ceiling: {hxr_ceiling:.1f} cts/s")
+    print(
+        f"  SXR ceiling: {sxr_ceiling:.0f} cts/s  HXR ceiling: {hxr_ceiling:.1f} cts/s"
+    )
     print(f"  Saturated: {n_sat} bins ({n_sat / N * 100:.2f}%)")
 
     # ================================================================
@@ -422,7 +436,7 @@ def run_stage1(date_str="20260623", master_path=None):
     sxr_snr = np.where(
         good & (bg_sigma_sxr > 0) & ~np.isnan(bg_sxr),
         (sxr_flux - bg_sxr) / bg_sigma_sxr,
-        np.nan
+        np.nan,
     ).astype(np.float32)
 
     # HXR excess
@@ -433,10 +447,12 @@ def run_stage1(date_str="20260623", master_path=None):
     hxr_snr = np.where(
         good & (bg_sigma_hxr > 0) & ~np.isnan(bg_hxr),
         (hxr_flux - bg_hxr) / bg_sigma_hxr,
-        np.nan
+        np.nan,
     ).astype(np.float32)
 
-    print(f"  SXR excess range: [{np.nanmin(sxr_excess):.3e}, {np.nanmax(sxr_excess):.3e}]")
+    print(
+        f"  SXR excess range: [{np.nanmin(sxr_excess):.3e}, {np.nanmax(sxr_excess):.3e}]"
+    )
     print(f"  SXR SNR range:    [{np.nanmin(sxr_snr):.2f}, {np.nanmax(sxr_snr):.2f}]")
     print(f"  HXR SNR range:    [{np.nanmin(hxr_snr):.2f}, {np.nanmax(hxr_snr):.2f}]")
 
@@ -456,14 +472,18 @@ def run_stage1(date_str="20260623", master_path=None):
     sxr_flux_cal, cal_slope, cal_intercept, cal_r2 = goes_cross_calibration(
         sxr_counts, goes_flux, master_flag, t
     )
-    print(f"  linregress: slope={cal_slope:.6e}, intercept={cal_intercept:.6e}, r²={cal_r2:.4f}")
-    print(f"  Calibrated flux range: [{np.nanmin(sxr_flux_cal):.3e}, {np.nanmax(sxr_flux_cal):.3e}] W/m²")
+    print(
+        f"  linregress: slope={cal_slope:.6e}, intercept={cal_intercept:.6e}, r²={cal_r2:.4f}"
+    )
+    print(
+        f"  Calibrated flux range: [{np.nanmin(sxr_flux_cal):.3e}, {np.nanmax(sxr_flux_cal):.3e}] W/m²"
+    )
 
     # ================================================================
     # 1.8 CZT Diagnostic
     # ================================================================
     print("[1.8] CZT diagnostic...")
-    czt_full = ds['hxr_czt_full'].astype(np.float64)
+    czt_full = ds["hxr_czt_full"].astype(np.float64)
     czt_valid = czt_full[~np.isnan(czt_full)]
     czt_zero_frac = np.sum(czt_valid == 0) / max(len(czt_valid), 1)
     print(f"  CZT zero-fraction: {czt_zero_frac * 100:.1f}%")
@@ -471,7 +491,9 @@ def run_stage1(date_str="20260623", master_path=None):
     czt_status = None
     if czt_zero_frac > 0.1:
         czt_status = "ZERO_INFLATED"
-        print(f"  → Zero-inflated ({czt_zero_frac*100:.0f}% zeros). Using CdTe broadband as primary HXR.")
+        print(
+            f"  → Zero-inflated ({czt_zero_frac * 100:.0f}% zeros). Using CdTe broadband as primary HXR."
+        )
     else:
         czt_status = "OK"
         print("  → CZT background acceptable.")
@@ -485,80 +507,74 @@ def run_stage1(date_str="20260623", master_path=None):
     print("\n[1.9] Assembling output...")
 
     stage1 = {
-        'time': t.astype(np.float64),
-        'sxr_flux': sxr_flux_cal,
-        'hxr_flux': hxr_flux.astype(np.float32),
-
-        'bg_sxr': bg_sxr,
-        'bg_hxr': bg_hxr,
-        'bg_sigma_sxr': bg_sigma_sxr,
-        'bg_sigma_hxr': bg_sigma_hxr,
-
-        'sxr_excess': sxr_excess_clipped,
-        'hxr_excess': hxr_excess_clipped,
-        'sxr_snr': sxr_snr,
-        'hxr_snr': hxr_snr,
-
-        'master_flag': master_flag,
-        'master_flag_str': flag_str,
-        'particle_mask': particle_mask,
-        'saturated_mask': saturated,
-        'anomaly_flag': anomaly_flag,
-        'czt_zero_mask': czt_zero_mask,
-
+        "time": t.astype(np.float64),
+        "sxr_flux": sxr_flux_cal,
+        "hxr_flux": hxr_flux.astype(np.float32),
+        "bg_sxr": bg_sxr,
+        "bg_hxr": bg_hxr,
+        "bg_sigma_sxr": bg_sigma_sxr,
+        "bg_sigma_hxr": bg_sigma_hxr,
+        "sxr_excess": sxr_excess_clipped,
+        "hxr_excess": hxr_excess_clipped,
+        "sxr_snr": sxr_snr,
+        "hxr_snr": hxr_snr,
+        "master_flag": master_flag,
+        "master_flag_str": flag_str,
+        "particle_mask": particle_mask,
+        "saturated_mask": saturated,
+        "anomaly_flag": anomaly_flag,
+        "czt_zero_mask": czt_zero_mask,
         # Per-band backgrounds (sub-band flagged states)
-        'hxr_cdte_band1': ds['hxr_cdte_band1'],
-        'hxr_cdte_band2': ds['hxr_cdte_band2'],
-        'hxr_cdte_band3': ds['hxr_cdte_band3'],
-        'hxr_cdte_band4': ds['hxr_cdte_band4'],
-        'bg_hxr_band1': bg_hxr_bands.get('cdte1', np.full(N, np.nan)),
-        'bg_hxr_band2': bg_hxr_bands.get('cdte2', np.full(N, np.nan)),
-        'bg_hxr_band3': bg_hxr_bands.get('cdte3', np.full(N, np.nan)),
-        'bg_hxr_band4': bg_hxr_bands.get('cdte4', np.full(N, np.nan)),
-
+        "hxr_cdte_band1": ds["hxr_cdte_band1"],
+        "hxr_cdte_band2": ds["hxr_cdte_band2"],
+        "hxr_cdte_band3": ds["hxr_cdte_band3"],
+        "hxr_cdte_band4": ds["hxr_cdte_band4"],
+        "bg_hxr_band1": bg_hxr_bands.get("cdte1", np.full(N, np.nan)),
+        "bg_hxr_band2": bg_hxr_bands.get("cdte2", np.full(N, np.nan)),
+        "bg_hxr_band3": bg_hxr_bands.get("cdte3", np.full(N, np.nan)),
+        "bg_hxr_band4": bg_hxr_bands.get("cdte4", np.full(N, np.nan)),
         # CZT data (diagnostic, not for primary use)
-        'hxr_czt_full': ds['hxr_czt_full'],
-        'hxr_czt_band1': ds['hxr_czt_band1'],
-        'hxr_czt_band2': ds['hxr_czt_band2'],
-        'hxr_czt_band3': ds['hxr_czt_band3'],
-        'hxr_czt_band4': ds['hxr_czt_band4'],
-
+        "hxr_czt_full": ds["hxr_czt_full"],
+        "hxr_czt_band1": ds["hxr_czt_band1"],
+        "hxr_czt_band2": ds["hxr_czt_band2"],
+        "hxr_czt_band3": ds["hxr_czt_band3"],
+        "hxr_czt_band4": ds["hxr_czt_band4"],
         # Supplementary (carried from Stage 0 for completeness)
-        'goes_flux': ds['goes_flux'],
-        'goes_flux_a': ds['goes_flux_a'],
-        'goes_class': ds['goes_class'],
-        'flare_id': ds['flare_id'],
-        'flare_label': ds['flare_label'],
-        'neupert_rho': ds['neupert_rho'],
-        'sxr_goes_equiv': ds['sxr_goes_equiv'],
-        'sxr_quality': ds['sxr_quality'],
-        'hxr_quality': ds['hxr_quality'],
-        'gap_type': ds['gap_type'],
+        "goes_flux": ds["goes_flux"],
+        "goes_flux_a": ds["goes_flux_a"],
+        "goes_class": ds["goes_class"],
+        "flare_id": ds["flare_id"],
+        "flare_label": ds["flare_label"],
+        "neupert_rho": ds["neupert_rho"],
+        "sxr_goes_equiv": ds["sxr_goes_equiv"],
+        "sxr_quality": ds["sxr_quality"],
+        "hxr_quality": ds["hxr_quality"],
+        "gap_type": ds["gap_type"],
     }
 
     stage1_meta = {
-        'stage': '1',
-        'version': 'v1.0.0',
-        'date_created': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'input': str(Path(master_path).resolve()),
-        'date_obs': date_str,
-        'n_samples': N,
-        'n_good': int(n_good),
-        'n_particle': n_particle,
-        'n_saturated': n_sat,
-        'n_anomaly': n_anom,
-        'czt_status': czt_status,
-        'czt_zero_fraction': float(czt_zero_frac),
-        'cal_method': 'GOES_linregress',
-        'cal_slope': cal_slope,
-        'cal_intercept': cal_intercept,
-        'cal_r2': cal_r2,
-        'bg_method_sxr': 'multiscale (SavGol 1h + rolling 10pct 10min)',
-        'bg_method_hxr': 'rolling_10pct_5min',
-        'flags_schema': FLAGS,
+        "stage": "1",
+        "version": "v1.0.0",
+        "date_created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "input": str(Path(master_path).resolve()),
+        "date_obs": date_str,
+        "n_samples": N,
+        "n_good": int(n_good),
+        "n_particle": n_particle,
+        "n_saturated": n_sat,
+        "n_anomaly": n_anom,
+        "czt_status": czt_status,
+        "czt_zero_fraction": float(czt_zero_frac),
+        "cal_method": "GOES_linregress",
+        "cal_slope": cal_slope,
+        "cal_intercept": cal_intercept,
+        "cal_r2": cal_r2,
+        "bg_method_sxr": "multiscale (SavGol 1h + rolling 10pct 10min)",
+        "bg_method_hxr": "rolling_10pct_5min",
+        "flags_schema": FLAGS,
     }
 
-    stage1['__metadata__'] = stage1_meta
+    stage1["__metadata__"] = stage1_meta
 
     out_path = f"data/processed/stage1_{date_str}.npz"
     np.savez_compressed(out_path, **stage1)

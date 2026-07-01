@@ -25,6 +25,8 @@ from pathlib import Path
 from multiprocessing import Pool
 from typing import Any
 
+import torch  # Module-level for GPU functions (avoids repeated init)
+
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -735,8 +737,7 @@ def _process_day_features_gpu(
     matrices instead of saving CSV.
     """
     d, day_event_times = args
-    import torch
-
+    # torch imported at module level
     LOOKBACK = 3600
     STEP = 300
     FORECAST_WINDOW = 1800
@@ -999,10 +1000,6 @@ def _process_day_features_gpu(
     torch.cuda.synchronize()
     X = row.cpu().numpy().astype(np.float32)
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # Clear GPU cache to prevent memory buildup across days
-    del sxr_g, hxr_g, row, feats
-    torch.cuda.empty_cache()
 
     # Labels
     y = np.zeros(n_w, dtype=int)
