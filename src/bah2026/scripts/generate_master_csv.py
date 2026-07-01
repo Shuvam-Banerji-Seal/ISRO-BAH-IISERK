@@ -118,7 +118,18 @@ for det, num in [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]:
 pi = load_solexs_pi(d)
 pr = pi["counts"].astype(np.float32)
 pi_sum = np.nansum(pr, axis=0)
-hk = load_hel1os_hk(d)
+try:
+    hk = load_hel1os_hk(d)
+except Exception:
+    hk = {
+        "columns": [],
+        "czt1temp": np.array([0.0]),
+        "czt2temp": np.array([0.0]),
+        "cdte1temp": np.array([0.0]),
+        "cdte2temp": np.array([0.0]),
+        "czthvmon": np.array([0.0]),
+        "cdtehvmon": np.array([0.0]),
+    }
 gti = load_solexs_gti(d)
 
 specs = {}
@@ -198,6 +209,15 @@ print(f"  GPU features: {len(feats_gpu)} features, {time.time() - t0:.1f}s", flu
 # ═══════════════════════════════════════════════════════════
 print("Computing CPU features...", flush=True)
 pre = {}
+# Defaults for optional data sources (GOES, HK — may be missing for some days)
+for _k in [
+    "goes_xrsb_flux",
+    "goes_xrsa_flux",
+    "goes_xrsa_xrsb_ratio",
+    "hk_czt1satctr",
+    "hk_cdte1pilectr",
+]:
+    pre[_k] = 0.0
 try:
     T, EM, chi2 = fit_temperature(pi_sum)
     pre["sxr_temperature_mk"] = float(T)
