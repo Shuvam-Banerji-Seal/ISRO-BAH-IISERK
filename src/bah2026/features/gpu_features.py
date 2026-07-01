@@ -57,6 +57,17 @@ def _batch_stats(windows: torch.Tensor) -> dict[str, torch.Tensor]:
     for pct in FEATURE_PERCENTILES:
         feats[f"sxr_p{pct}"] = torch.quantile(windows, pct / 100.0, dim=1)
 
+    # Skewness: E[(x-mu)^3] / sigma^3
+    diff_skew = windows - feats["sxr_mean"].unsqueeze(1)
+    feats["sxr_skew"] = (diff_skew**3).mean(dim=1) / (
+        feats["sxr_std"].clamp(min=1e-10) ** 3
+    )
+
+    # Kurtosis: E[(x-mu)^4] / sigma^4 - 3
+    feats["sxr_kurtosis"] = (diff_skew**4).mean(dim=1) / (
+        feats["sxr_std"].clamp(min=1e-10) ** 4
+    ) - 3.0
+
     diff_sq = diff**2
     feats["d2sxr_dt2_mean"] = (
         (diff_sq[:, 1:] - diff_sq[:, :-1]).mean(dim=1)

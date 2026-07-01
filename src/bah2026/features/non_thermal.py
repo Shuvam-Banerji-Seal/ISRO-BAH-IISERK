@@ -304,6 +304,8 @@ def separate_thermal_non_thermal(
         if total_in_range > 0
         else 0.0
     )
+    # Clip to physical range [0, 1]
+    thermal_fraction = float(np.clip(thermal_fraction, 0.0, 1.0))
 
     return {
         "t_mk": t_fit,

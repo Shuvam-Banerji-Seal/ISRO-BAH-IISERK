@@ -104,19 +104,27 @@ def fit_temperature(
         def model(e, T_mk, EM):
             return EM * e ** (-1) * np.exp(-e / (T_mk * 0.086))
 
+        # Scale EM to avoid overflow: work in log-space
+        log_em_guess = np.log10(max(em_guess, 1e40))
+        log_em_guess = np.clip(log_em_guess, 40, 52)
+
         popt, pcov = curve_fit(
             model,
             e_fit,
             counts_fit,
-            p0=[10.0, em_guess],
+            p0=[10.0, 10**log_em_guess],
             bounds=([1.0, 1e40], [100.0, 1e55]),
-            max_nfev=200,
+            max_nfev=500,
         )
         T_mk, EM = popt
+        # Clip EM to reasonable range
+        EM = np.clip(EM, 1e40, 1e55)
         # Reduced chi-squared
         predicted = model(e_fit, T_mk, EM)
         resid = counts_fit - predicted
-        chi2_red = np.sum(resid**2 / np.maximum(counts_fit, 1)) / (len(counts_fit) - 2)
+        chi2_red = np.sum(resid**2 / np.maximum(counts_fit, 1)) / max(
+            len(counts_fit) - 2, 1
+        )
         return float(T_mk), float(EM), float(chi2_red)
     except Exception:
         return 0.0, 0.0, 999.0
