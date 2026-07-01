@@ -245,21 +245,143 @@ isro-bah-iiserk/
 
 ---
 
-## Quick Start
+## Installation
 
 ```bash
-# Single day analysis (GPU-accelerated)
+# The project uses Python 3.13+ with UV package manager
+# Virtual environment is at .venv/ (pre-configured)
+
+# Activate virtual environment
+source .venv/bin/activate
+
+# Verify dependencies
+uv sync
+
+# Or use the venv Python directly
+.venv/bin/python3 --version
+```
+
+## Usage
+
+### 1. Generate Master CSV (Single Day Analysis)
+
+This is the primary entry point. Processes one day of SoLEXS + HEL1OS data and produces a complete CSV with all 179 features plus interpretation JSON.
+
+```bash
+# Run with specific date
 .venv/bin/python3 src/bah2026/scripts/generate_master_csv.py 2024-05-05
 
-# Output:
-#   output/master_csv/master_May_5_2024.csv
-#   output/master_csv/master_May_5_2024_interpretation.json
+# Run without arguments defaults to 2024-05-05
+.venv/bin/python3 src/bah2026/scripts/generate_master_csv.py
 
-# Run tests
+# Output files:
+#   output/master_csv/master_May_5_2024.csv          (277 x 277 cols)
+#   output/master_csv/master_May_5_2024_interpretation.json  (15 sections)
+```
+
+### 2. Interpret the Results
+
+Each CSV has an auto-generated interpretation JSON with 15 analysis sections:
+
+```python
+import json
+
+with open("output/master_csv/master_May_5_2024_interpretation.json") as f:
+    report = json.load(f)
+
+# Flare catalog
+print(report["flare_catalog"]["total"], "flares detected")
+for flare in report["flare_catalog"]["flares"]:
+    print(f"  {flare['goes_class_estimated']} at {flare['peak_utc']}")
+
+# Neupert effect
+print("Neupert correlation:", report["neupert_effect"]["integral_correlation_r"])
+
+# Feature group analysis
+for group in report["feature_interpretations"]:
+    print(f"{group['group']}: {group['activity']} ({group['n_nonzero']}/{group['n_total']})")
+```
+
+### 3. Using as a Python Module
+
+```python
+import sys
+sys.path.insert(0, "src")
+
+from bah2026.main import _process_day_nowcast, _process_day_features_gpu
+from bah2026.data import discover_combined_days, load_solexs_lc
+from bah2026.features.interpretation import build_physical_interpretation, save_interpretation
+
+# Discover available days
+days = discover_combined_days()
+print(f"{len(days)} days with combined SoLEXS + HEL1OS data")
+
+# Load raw data for a specific day
+d = days[0]
+sxr = load_solexs_lc(d)
+print(f"SoLEXS data: {len(sxr['counts'])} samples")
+
+# Extract features (GPU-accelerated)
+X, y = _process_day_features_gpu((d, []))
+print(f"Feature matrix: {X.shape}")  # (277, 179)
+print(f"Flare labels: {y.sum()} positive out of {len(y)}")
+
+# Run flare detection
+events = _process_day_nowcast((d, str(d)))
+print(f"Detected {len(events)} flares")
+```
+
+### 4. Run Tests
+
+```bash
+# All tests (120+)
 PYTHONPATH=src .venv/bin/python3 -m pytest tests/ -v
 
-# Train forecasting model
-PYTHONPATH=src .venv/bin/python3 -c "from bah2026.main import cmd_train; cmd_train()"
+# Specific test modules
+PYTHONPATH=src .venv/bin/python3 -m pytest tests/test_features.py -v
+PYTHONPATH=src .venv/bin/python3 -m pytest tests/test_qpp.py -v
+PYTHONPATH=src .venv/bin/python3 -m pytest tests/test_non_thermal.py -v
+
+# Feature coverage test
+PYTHONPATH=src .venv/bin/python3 -m pytest tests/test_feature_coverage.py -v
+```
+
+### 5. Batch Processing (All 724 Days)
+
+```bash
+# Generate date list
+.venv/bin/python3 -c "
+from bah2026.data import discover_combined_days
+for d in discover_combined_days():
+    print(d)
+" > /tmp/all_days.txt
+
+# Run 4 in parallel (GPU-optimized)
+tail -n +2 /tmp/all_days.txt | xargs -I {} -P 4 bash -c '
+.venv/bin/python3 src/bah2026/scripts/generate_master_csv.py ${1} > output/batch_logs/${1}.log 2>&1
+' _ {}
+```
+
+### 6. Train Forecasting Model
+
+```bash
+# Full pipeline: nowcast -> GPU features -> CatBoost training
+PYTHONPATH=src .venv/bin/python3 -c "
+from bah2026.main import cmd_train
+cmd_train()
+"
+```
+
+### 7. Command Line Interface
+
+```bash
+# The main module provides a CLI for the full pipeline
+PYTHONPATH=src .venv/bin/python3 -c "
+from bah2026.main import main
+import sys
+sys.argv = ['bah2026', 'nowcast']  # or 'features', 'forecast', 'train'
+main()
+"
 ```
 
 ## Key Results
