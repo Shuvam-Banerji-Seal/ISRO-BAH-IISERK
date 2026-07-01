@@ -9,89 +9,69 @@
 ## Pipeline Overview
 
 ```mermaid
-graph TB
-    subgraph "📡 Data Ingestion"
-        A[SoLEXS SDD2 LC] -->|86400 rows × 1s| B[Raw SXR Counts]
-        C[HEL1OS CZT1/CZT2/CdTe1/CdTe2] -->|20 bands × 1s| D[Raw HXR Counts]
-        E[SoLEXS PI] -->|86400×340 spectra| F[PI Spectra]
-        G[HEL1OS HK] -->|62 columns| H[Housekeeping]
-        I[GOES XRS-A/B] -->|netCDF| J[GOES Flux]
+flowchart TB
+    subgraph Data Ingestion
+        A[SoLEXS SDD2 LC] --> B[Raw SXR Counts 86400]
+        C[HEL1OS 4 detectors] --> D[Raw HXR Counts 86400x20]
+        E[SoLEXS PI] --> F[PI Spectra 86400x340]
+        G[HEL1OS HK] --> H[Housekeeping 62 cols]
+        I[GOES XRS] --> J[GOES Flux]
     end
 
-    subgraph "🔧 Data Correction"
-        B -->|Deadtime τ=13.65µs| K[Corrected SXR]
-        D -->|BG subtraction CZT=70cps| L[BKGD-sub HXR]
-        F -->|Channel energies| M[Calibrated PI]
-        K -->|GTI masking| N[Clean SXR]
-        L -->|Align to SoLEXS grid| O[Aligned HXR 86400×20]
+    subgraph Corrections
+        B --> K[Deadtime corrected SXR]
+        D --> L[Background subtracted HXR]
+        F --> M[Calibrated PI]
+        K --> N[GTI masked SXR]
+        L --> O[Aligned HXR]
     end
 
-    subgraph "🚀 GPU Batch Features (A100)"
-        N -->|unfold 3600s windows| P[SXR Windows 277×3600]
-        O -->|unfold 3600s windows| Q[HXR Windows 277×3600×20]
-        P -->|_batch_stats"| R[SXR Stats 15]
-        P -->|_batch_acf| S[ACF 4]
-        P -->|_batch_spectral_entropy| T[Spectral Entropy 2]
-        P -->|_batch_derivative_features| U[Derivatives 12]
-        P -->|_batch_multiscale| V[Multiscale 24]
-        P -->|_batch_neupert| W[Neupert 2]
-        Q -->|_batch_hxr_features| X[HXR Bands 35]
-        Q -->|_batch_pi_spectral_features| Y[Cross-detector 6]
+    subgraph GPU_Batch[A100 GPU Batch]
+        N --> P[SXR Windows 277x3600]
+        O --> Q[HXR Windows 277x3600x20]
+        P --> R[Stats + ACF + Entropy]
+        P --> S[Derivatives + Multiscale]
+        P --> T[Neupert Correlation]
+        Q --> U[HXR Band Features]
+        Q --> V[Cross-detector Stats]
     end
 
-    subgraph "🧠 CPU Day-Level Features"
-        M -->|fit_temperature| Z[T, EM, χ² 3]
-        L -->|fit_spectral_index| AA[Spectral Index γ 4]
-        L -->|fit_combined_spectrum| AB[Non-thermal γ,Ec,N_nth 4]
-        H -->|HK stats| AC[Detector Temps, HV 8]
-        J -->|GOES flux| AD[GOES XRS-B/A 3]
-        L -->|granger_causality_simple| AE[Granger 2]
-        L -->|mediation_analysis| AF[Mediation 1]
-        L -->|detect_qpp_during_flares| AG[QPP 4]
-        L -->|information_theory| AH[TE, MI, SampEn 6]
-        J -->|extract_goes_timeseries_features| AI[GOES TS 8]
-        M -->|extract_per_window_spectral| AJ[Window Spectral 8]
-        L -->|extract_wavelet_scalogram_features| AK[Wavelet 10]
+    subgraph CPU_Features
+        M --> W[Temperature EM chi2]
+        O --> X[Spectral Indices gamma]
+        O --> Y[Non-thermal params]
+        O --> Z[Granger + Mediation]
+        O --> AA[QPP Detection]
+        H --> AB[HK Statistics]
+        J --> AC[GOES Flux]
+        J --> AD[GOES Time Series]
+        M --> AE[Window Spectral]
+        O --> AF[Wavelet Scalogram]
     end
 
-    subgraph "📊 Feature Matrix"
-        R --> AL[179 Features]
-        S --> AL
-        T --> AL
-        U --> AL
-        V --> AL
-        W --> AL
-        X --> AL
-        Y --> AL
-        Z --> AL
-        AA --> AL
-        AB --> AL
-        AC --> AL
-        AD --> AL
-        AE --> AL
-        AF --> AL
-        AG --> AL
-        AH --> AL
-        AI --> AL
-        AJ --> AL
-        AK --> AL
+    subgraph Feature_Matrix[179 Feature Matrix]
+        R --> AG
+        S --> AG
+        T --> AG
+        U --> AG
+        V --> AG
+        W --> AG
+        X --> AG
+        Y --> AG
+        Z --> AG
+        AA --> AG
+        AB --> AG
+        AC --> AG
+        AD --> AG
+        AE --> AG
+        AF --> AG
     end
 
-    subgraph "🤖 Model Training"
-        AL -->|StandardScaler| AM[Scaled Features]
-        AM -->|CatBoost GPU| AN[GBDT TSS=0.412]
-        AM -->|XGBoost| AO[XGBoost TSS=0.371]
-        AM -->|LightGBM| AP[LightGBM TSS=0.331]
-        AM -->|CNN-LSTM| AQ[LSTM TSS=0.341]
-    end
-
-    subgraph "📁 Output"
-        AN --> AR[Forecast Results]
-        AO --> AR
-        AP --> AR
-        AQ --> AR
-        AL -->|save_csv"| AS[Master CSV 277×277]
-        AS -->|interpretation.py"| AT[Interpretation JSON]
+    subgraph Output
+        AG --> AH[Master CSV 277x277]
+        AG --> AI[Interpretation JSON]
+        AH --> AJ[CatBoost XGBoost LightGBM]
+        AJ --> AK[TSS AUC Precision Recall]
     end
 ```
 
@@ -102,29 +82,29 @@ graph TB
 ```mermaid
 flowchart LR
     subgraph Input
-        A[SoLEXS FITS] -->|.lc| B[SXR Counts 86400]
-        A -->|.pi| C[PI Spectra 86400×340]
-        D[HEL1OS FITS] -->|lightcurve| E[HXR Bands 86400×20]
-        D -->|hk.fits| F[HK Data 62 cols]
-        G[GOES NC] -->|XRS-B/A| H[Flux 86400×2]
+        A1[SoLEXS FITS] --> B1[SXR Counts]
+        A1 --> C1[PI Spectra]
+        D1[HEL1OS FITS] --> E1[HXR Bands]
+        D1 --> F1[HK Data]
+        G1[GOES NC] --> H1[Flux]
     end
 
     subgraph Pipeline
-        B --> I((generate_master_csv.py))
-        C --> I
-        E --> I
-        F --> I
-        H --> I
-        I --> J[CSV 277×277]
-        I --> K[Interpretation JSON]
+        B1 --> I1[generate_master_csv.py]
+        C1 --> I1
+        E1 --> I1
+        F1 --> I1
+        H1 --> I1
+        I1 --> J1[CSV 277 x 277]
+        I1 --> K1[Interpretation JSON]
     end
 
     subgraph Output
-        J --> L[179 GPU Features]
-        J --> M[80 CPU Features]
-        J --> N[18 Metadata]
-        K --> O[15 Analysis Sections]
-        K --> P[19 Feature Groups]
+        J1 --> L1[179 GPU Features]
+        J1 --> M1[80 CPU Features]
+        J1 --> N1[18 Metadata]
+        K1 --> O1[15 Analysis Sections]
+        K1 --> P1[19 Feature Groups]
     end
 ```
 
@@ -133,60 +113,58 @@ flowchart LR
 ## Feature Extraction Architecture
 
 ```mermaid
-graph TD
-    subgraph "GPU Batch (A100 80GB)"
-        A[277 Windows × 3600s] -->|torch to CUDA| B[GPU Tensor]
-        B --> C{8 Batch Functions}
-        C --> D[_batch_stats: 15 feats]
-        C --> E[_batch_acf: 4 feats]
-        C --> F[_batch_spectral_entropy: 2 feats]
-        C --> G[_batch_derivative_features: 12 feats]
-        C --> H[_batch_multiscale: 24 feats]
-        C --> I[_batch_neupert: 2 feats]
-        C --> J[_batch_hxr_features: 35 feats]
-        C --> K[_batch_pi_spectral_features: 6 feats]
-        D --> L[133 GPU Features in 1.1s]
-        E --> L
-        F --> L
-        G --> L
-        H --> L
-        I --> L
-        J --> L
-        K --> L
+flowchart TD
+    subgraph GPU[GPU Batch A100]
+        A1[277 Windows] --> B1[GPU Tensor]
+        B1 --> C1[Stats 15 feats]
+        B1 --> D1[ACF 4 feats]
+        B1 --> E1[Spectral Entropy 2 feats]
+        B1 --> F1[Derivatives 12 feats]
+        B1 --> G1[Multiscale 24 feats]
+        B1 --> H1[Neupert 2 feats]
+        B1 --> I1[HXR Bands 35 feats]
+        B1 --> J1[Cross-detector 6 feats]
+        C1 --> K1[133 GPU Feats in 1.1s]
+        D1 --> K1
+        E1 --> K1
+        F1 --> K1
+        G1 --> K1
+        H1 --> K1
+        I1 --> K1
+        J1 --> K1
     end
 
-    subgraph "CPU Day-Level"
-        M[Full-day Data] --> N{16 Computations}
-        N --> O[T, EM, χ² from PI]
-        N --> P[Spectral Index γ×4 detectors]
-        N --> Q[Non-thermal fit]
-        N --> R[HK stats ×8]
-        N --> S[GOES flux ×3]
-        N --> T[Granger causality]
-        N --> U[Mediation analysis]
-        N --> V[QPP detection]
-        N --> W[Info theory ×6]
-        N --> X[GOES time-series ×8]
-        N --> Y[Per-window spectral ×8]
-        N --> Z[Wavelet scalogram ×10]
-        O --> AA[46 CPU Features in 4s]
-        P --> AA
-        Q --> AA
-        R --> AA
-        S --> AA
-        T --> AA
-        U --> AA
-        V --> AA
-        W --> AA
-        X --> AA
-        Y --> AA
-        Z --> AA
+    subgraph CPU[CPU Day Level]
+        L1[Full Day Data] --> M1[Temperature EM chi2]
+        L1 --> N1[Spectral Index 4 detectors]
+        L1 --> O1[Non-thermal fit]
+        L1 --> P1[HK Stats 8]
+        L1 --> Q1[GOES Flux 3]
+        L1 --> R1[Granger Causality]
+        L1 --> S1[Mediation]
+        L1 --> T1[QPP Detection]
+        L1 --> U1[Info Theory 6]
+        L1 --> V1[GOES Time Series 8]
+        L1 --> W1[Window Spectral 8]
+        L1 --> X1[Wavelet 10]
+        M1 --> Y1[46 CPU Feats in 4s]
+        N1 --> Y1
+        O1 --> Y1
+        P1 --> Y1
+        Q1 --> Y1
+        R1 --> Y1
+        S1 --> Y1
+        T1 --> Y1
+        U1 --> Y1
+        V1 --> Y1
+        W1 --> Y1
+        X1 --> Y1
     end
 
-    L --> AB[179 Total Features]
-    AA --> AB
-    AB --> AC[Master CSV 277×277]
-    AC --> AD[Interpretation JSON]
+    K1 --> Z1[179 Total Features]
+    Y1 --> Z1
+    Z1 --> AA1[Master CSV 277 x 277]
+    AA1 --> AB1[Interpretation JSON]
 ```
 
 ---
@@ -194,16 +172,16 @@ graph TD
 ## Interpretation Pipeline
 
 ```mermaid
-graph LR
-    A[Master CSV] --> B{interpretation.py}
-    B --> C[Flare Catalog<br/>timing + class + HXR]
-    B --> D[Neupert Effect<br/>r = corr(SXR,∫HXR)]
-    B --> E[Cross-Correlation<br/>HXR vs SXR lag]
-    B --> F[Power Spectrum<br/>Lomb-Scargle periods]
-    B --> G[QPP Analysis<br/>wavelet + LS]
-    B --> H[Spectral Evolution<br/>hardness ratio]
-    B --> I[Causal Network<br/>Granger + mediation]
-    B --> J[Feature Groups<br/>19 groups × per-group analysis]
+flowchart LR
+    A[Master CSV] --> B[interpretation.py]
+    B --> C[Flare Catalog]
+    B --> D[Neupert Effect]
+    B --> E[Cross Correlation]
+    B --> F[Power Spectrum]
+    B --> G[QPP Analysis]
+    B --> H[Spectral Evolution]
+    B --> I[Causal Network]
+    B --> J[Feature Groups 19]
     C --> K[Interpretation JSON]
     D --> K
     E --> K
