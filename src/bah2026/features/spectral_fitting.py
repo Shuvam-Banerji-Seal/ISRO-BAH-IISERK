@@ -108,24 +108,38 @@ def fit_temperature(
         log_em_guess = np.log10(max(em_guess, 1e40))
         log_em_guess = np.clip(log_em_guess, 40, 52)
 
+        # Cap initial EM guess at upper bound (1e50) — scipy requires
+        # initial parameters strictly within bounds for some versions
+        em_initial = min(10**log_em_guess, 1e49)  # Stay below upper bound
         popt, pcov = curve_fit(
             model,
             e_fit,
             counts_fit,
-            p0=[10.0, 10**log_em_guess],
-            bounds=([1.0, 1e40], [100.0, 1e55]),
+            p0=[10.0, em_initial],
+            bounds=(
+                [1.0, 1e40],
+                [100.0, 1e50],
+            ),  # EM upper bound: 1e50 (physical limit)
             max_nfev=500,
         )
         T_mk, EM = popt
-        # Clip EM to reasonable range
-        EM = np.clip(EM, 1e40, 1e55)
+        # Cap EM at physical upper limit (1e50 cm^-3)
+        EM = np.clip(EM, 1e40, 1e50)
         # Reduced chi-squared
         predicted = model(e_fit, T_mk, EM)
         resid = counts_fit - predicted
         chi2_red = np.sum(resid**2 / np.maximum(counts_fit, 1)) / max(
             len(counts_fit) - 2, 1
         )
-        return float(T_mk), float(EM), float(chi2_red)
+        # Note: chi2_red can be very large (>1e50) on flare days because
+        # the isothermal model doesn't capture multi-thermal plasma or
+        # line emission. The fit may still give a reasonable T estimate.
+        # Quality assessment is done in the interpretation layer.
+        return (
+            float(T_mk),
+            float(EM),
+            float(chi2_red) if np.isfinite(chi2_red) else 999.0,
+        )
     except Exception:
         return 0.0, 0.0, 999.0
 
@@ -198,6 +212,11 @@ def fit_spectral_index(
         A = np.vstack([log_e, np.ones_like(log_e)]).T
         coeffs, *_ = np.linalg.lstsq(A, log_r, rcond=None)
         gamma = -coeffs[0]  # negative slope
+        # Reject unphysical spectral indices: gamma < 1.5 means the
+        # spectrum rises with energy, impossible for bremsstrahlung.
+        # Gamma > 10 is also unphysical (extremely soft, noise-dominated).
+        if gamma < 1.5 or gamma > 10.0:
+            return 0.0
         return float(gamma)
     except Exception:
         return 0.0
@@ -258,6 +277,53 @@ def neupert_correlation(
             pass
 
     return rho
+
+
+def neupert_correlation_integral(
+    sxr_counts: np.ndarray,
+    hxr_counts: np.ndarray,
+    smooth_sec: int = 30,
+) -> float:
+    """Compute Neupert correlation using the integral form: SXR vs ∫HXR dt.
+
+    The Neupert effect states SXR(t) ∝ ∫₀ᵗ HXR(τ) dτ (integral form).
+    This is more robust than the instantaneous derivative form because
+    1-second differentiation amplifies photon counting noise.
+
+    Parameters
+    ----------
+    sxr_counts : ndarray
+        SoLEXS count rate (1 s cadence).
+    hxr_counts : ndarray
+        HEL1OS count rate (1 s cadence, same length).
+    smooth_sec : int
+        Smoothing window for both signals (seconds). Default 30s.
+
+    Returns
+    -------
+    rho : float
+        Pearson r between SXR and cumulative HXR.
+    """
+    min_len = min(len(sxr_counts), len(hxr_counts))
+    sxr = sxr_counts[:min_len].copy()
+    hxr = hxr_counts[:min_len].copy()
+
+    # Remove mean and compute cumulative HXR integral
+    cum_hxr = np.cumsum(hxr - np.mean(hxr))
+    # Smooth both to reduce noise
+    from scipy.ndimage import uniform_filter1d
+
+    w = max(1, min(smooth_sec, min_len // 4))
+    sxr_s = uniform_filter1d(sxr, size=w, mode="nearest")
+    cum_hxr_s = uniform_filter1d(cum_hxr, size=w, mode="nearest")
+
+    from scipy.stats import pearsonr
+
+    try:
+        r, p = pearsonr(sxr_s, cum_hxr_s)
+        return float(r) if np.isfinite(r) else 0.0
+    except Exception:
+        return 0.0
 
 
 # ── Batch processing for feature engineering ──────────────────────────

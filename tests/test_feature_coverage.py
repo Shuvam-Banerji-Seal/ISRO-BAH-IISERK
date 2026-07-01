@@ -174,7 +174,10 @@ def analyze_feature_coverage(
 
 def test_feature_coverage_baseline():
     """Run against existing master CSV and report coverage."""
-    csv_path = Path("output/master_csv/master_may5_2024.csv")
+    # Try current filename format, fallback to old format
+    csv_path = Path("output/master_csv/master_May_5_2024.csv")
+    if not csv_path.exists():
+        csv_path = Path("output/master_csv/master_may5_2024.csv")
     assert csv_path.exists(), f"Master CSV not found: {csv_path}"
 
     report = analyze_feature_coverage(csv_path)

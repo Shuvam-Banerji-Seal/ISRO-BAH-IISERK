@@ -303,9 +303,9 @@ FEATURE_GROUPS = [
         "group": "correction_statistics",
         "n_features": 2,
         "features": ["deadtime_max_pct", "bg_fraction_pct"],
-        "physical_process": "Instrument corrections: deadtime (paralyzable, tau=13.65us) and HXR background subtraction (CZT=70 cps, CdTe=0.15 cps).",
-        "flare_behavior": "Deadtime increases during flares (higher count rate). >10% for X-class flares. Background fraction decreases (signal >> background).",
-        "quiet_behavior": "Deadtime ~ 1-3%. Background fraction ~ 30-50% of HXR counts.",
+        "physical_process": "deadtime_max_pct = SoLEXS GTI gap fraction (Earth occultation + instrument downtime). bg_fraction_pct = fraction of HXR counts below background threshold.",
+        "flare_behavior": "GTI gap fraction = instrument coverage (not deadtime). Lower during flares (observing target well-positioned). Background fraction decreases during flares (signal >> background).",
+        "quiet_behavior": "GTI gap fraction typically 30-50% (Earth occultation, SAA passage). Background fraction ~30-50% of HXR counts for quiet periods.",
     },
     {
         "group": "advanced_goes_timeseries",
@@ -618,6 +618,9 @@ def build_physical_interpretation(
         }
 
     # ── 4. Neupert effect ────────────────────────────────────────────
+    # Uses the INTEGRAL form: SXR(t) ∝ ∫HXR(τ)dτ, which is more robust
+    # than the instantaneous derivative form (dSXR/dt ~ HXR at 1s is
+    # dominated by photon counting noise).
     best_f = None
     best_hxr_val = 0
     for f in flares:
@@ -635,15 +638,21 @@ def build_physical_interpretation(
         if m.sum() > 50:
             sxr_v = sxr_seg[m]
             hxr_v_seg = hxr_seg[m]
-            dsxr_v = np.diff(sxr_v, prepend=sxr_v[0])
-            r_n, p_n = pearsonr(dsxr_v, hxr_v_seg)
+            from bah2026.features.spectral_fitting import (
+                neupert_correlation,
+                neupert_correlation_integral,
+            )
+
+            # Integral form (standard in literature: SXR ~ cumulative HXR)
+            r_integral = neupert_correlation_integral(sxr_v, hxr_v_seg, smooth_sec=30)
+            # Derivative form (sliding windows, for reference)
             rs = neupert_correlation(sxr_v, hxr_v_seg, window_sec=120, step_sec=30)
             rv = rs[np.isfinite(rs)]
             report["neupert_effect"] = {
-                "pearson_r": round(float(r_n), 4),
-                "p_value": f"{p_n:.2e}",
-                "sliding_rho_mean": round(float(np.nanmean(rv)), 4),
-                "sliding_rho_max": round(float(np.nanmax(rv)), 4),
+                "method": "integral form: SXR vs cumsum(HXR), smoothed 30s",
+                "integral_correlation_r": round(float(r_integral), 4),
+                "sliding_derivative_rho_mean": round(float(np.nanmean(rv)), 4),
+                "sliding_derivative_rho_max": round(float(np.nanmax(rv)), 4),
             }
 
     # ── 5. Cross-correlation ─────────────────────────────────────────

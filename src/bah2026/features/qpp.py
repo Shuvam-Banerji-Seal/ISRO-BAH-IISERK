@@ -434,6 +434,11 @@ def detect_qpp(
         if not unique_periods or abs(p - unique_periods[-1]) / p > 0.1:
             unique_periods.append(p)
 
+    # Reject periods at the boundary of the search range (>90% of max_period)
+    # These are typically the flare envelope, not true QPP oscillations.
+    period_boundary = max_period * 0.9
+    unique_periods = [p for p in unique_periods if p <= period_boundary]
+
     detected = len(unique_periods) > 0
     best_period = unique_periods[0] if unique_periods else 0.0
 
