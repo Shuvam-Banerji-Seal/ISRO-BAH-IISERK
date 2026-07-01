@@ -56,7 +56,7 @@ from bah2026.features.information_theory import (
     sample_entropy,
     lagged_cross_correlation,
 )
-from bah2026.features.qpp import detect_qpp
+from bah2026.features.qpp import detect_qpp, detect_qpp_during_flares
 from bah2026.models.adaptive_detection import (
     detect_flares_adaptive,
     classify_solexs_helios,
@@ -275,20 +275,24 @@ else:
     ]:
         pre[k] = 0.0
 
-# QPP — filter NaN from HXR
+# QPP — detect during flare intervals (transient signal, full-day dilutes)
 hxr_qpp = hxr4_combined[:, 4].astype(np.float32)
-hxr_qpp_valid = hxr_qpp[np.isfinite(hxr_qpp)]
-if len(hxr_qpp_valid) > 100:
-    qpp = detect_qpp(hxr_qpp_valid, dt=1.0, min_period=10, max_period=300)
-    pre["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
-    pre["qpp_period"] = float(qpp["period"])
-    pre["qpp_amplitude"] = float(qpp["amplitude"])
-    pre["qpp_significance"] = (
-        float(qpp["significance"]) if np.isfinite(qpp["significance"]) else 0.0
-    )
-else:
-    for k in ["qpp_detected", "qpp_period", "qpp_amplitude", "qpp_significance"]:
-        pre[k] = 0.0
+qpp = detect_qpp_during_flares(
+    counts,
+    hxr_qpp,
+    dt=1.0,
+    min_period=10,
+    max_period=300,
+    min_flare_duration=60,
+    flare_sigma=3.0,
+    padding_sec=300,
+)
+pre["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
+pre["qpp_period"] = float(qpp["period"])
+pre["qpp_amplitude"] = float(qpp["amplitude"])
+pre["qpp_significance"] = (
+    float(qpp["significance"]) if np.isfinite(qpp["significance"]) else 0.0
+)
 
 # Granger + mediation — filter NaN from both HXR and SXR
 ds = 10

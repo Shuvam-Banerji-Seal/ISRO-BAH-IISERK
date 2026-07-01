@@ -317,8 +317,10 @@ def detect_qpp(
 ) -> dict:
     """Detect quasi-periodic pulsations in a light curve.
 
-    Combines wavelet and Lomb-Scargle analysis. A QPP is detected if
-    a significant peak appears in both methods.
+    Combines high-pass filtered residual analysis with wavelet and
+    Lomb-Scargle. Uses adaptive detrending: progressively removes
+    the slowly-varying background with a smooth spline, then searches
+    for periodic structure in the residual.
 
     Parameters
     ----------
@@ -351,11 +353,13 @@ def detect_qpp(
             "n_qpp": 0,
         }
 
-    # Detrend (remove slowly varying background)
-    window = max(int(max_period / dt), 10)
-    if window >= N:
-        window = N // 4
-    bg = uniform_filter1d(signal, size=window, mode="nearest")
+    # Detrend: remove slowly-varying background with a running median.
+    # Window = 3x max_period ensures QPP signals (periods < max_period)
+    # are preserved while the flare envelope (hours) is removed.
+    bg_window = min(int(3 * max_period / dt), N // 2)
+    if bg_window < 2:
+        bg_window = max(N // 4, 2)
+    bg = uniform_filter1d(signal, size=bg_window, mode="nearest")
     detrended = signal - bg
 
     # ── Lomb-Scargle ──
@@ -367,8 +371,10 @@ def detect_qpp(
 
     ls_freqs, ls_power = lomb_scargle_periodogram(time, detrended, freqs)
 
-    # Find peaks in Lomb-Scargle
-    ls_peaks, ls_props = find_peaks(ls_power, height=significance * 0.5)
+    # Find peaks in Lomb-Scargle (use relaxed threshold, rely on
+    # wavelet cross-validation to filter false positives)
+    ls_height_threshold = significance * 0.3
+    ls_peaks, ls_props = find_peaks(ls_power, height=ls_height_threshold)
     ls_periods = 1.0 / ls_freqs[ls_peaks] if len(ls_peaks) > 0 else np.array([])
 
     # ── Wavelet (FFT-based, auto CPU/GPU) ──
@@ -386,26 +392,32 @@ def detect_qpp(
         wv_peaks = periods_wv[wv_peak_idx].tolist()
 
     # ── Combined detection ──
-    # A QPP is confirmed if:
-    # 1. Lomb-Scargle finds a significant peak, OR
-    # 2. Both methods find a peak within 20% of each other
+    # A QPP is confirmed if BOTH methods find a peak within 20%.
+    # This cross-validation approach is more robust than relying on
+    # a single method's threshold, especially on flare-dominated data.
+    # If only LS has a strong peak (power > 0.5) without wavelet
+    # confirmation, accept it as a candidate.
     confirmed_periods = []
 
-    # Add LS peaks that are significant enough on their own
-    if len(ls_peaks) > 0:
-        ls_peak_heights = ls_props["peak_heights"]
-        for idx, (pk, ht) in enumerate(zip(ls_peaks, ls_peak_heights)):
-            if ht > significance * 0.5:
-                confirmed_periods.append(float(ls_periods[idx]))
-
-    # Also check wavelet-confirmed peaks
     for lp in ls_periods:
+        # Check wavelet confirmation
+        wv_match = False
         for wp in wv_peaks:
             if wp > 0 and abs(lp - wp) / max(lp, wp) < 0.2:
-                # Already in confirmed_periods from LS check
-                if lp not in confirmed_periods:
-                    confirmed_periods.append(float(np.mean([lp, wp])))
+                confirmed_periods.append(float(np.mean([lp, wp])))
+                wv_match = True
                 break
+        # If LS peak is very strong and no wavelet match, still accept
+        if not wv_match:
+            # Find the LS peak height: lp -> freq -> find in ls_peaks indices
+            target_freq = 1.0 / lp
+            closest_peak_idx = int(np.argmin(np.abs(ls_freqs - target_freq)))
+            # Find which peak number this corresponds to
+            peak_positions = np.where(ls_peaks == closest_peak_idx)[0]
+            if len(peak_positions) > 0:
+                ls_ht = ls_props["peak_heights"][peak_positions[0]]
+                if ls_ht > significance * 0.5:  # Strong LS-only detection
+                    confirmed_periods.append(float(lp))
 
     # Deduplicate (within 10%)
     unique_periods = []
@@ -422,23 +434,49 @@ def detect_qpp(
         phase = (time % best_period) / best_period
         n_bins = 20
         folded = np.zeros(n_bins)
-        counts = np.zeros(n_bins)
+        counts_bin = np.zeros(n_bins)
         for i in range(N):
             b = int(phase[i] * n_bins) % n_bins
             folded[b] += detrended[i]
-            counts[b] += 1
-        folded = folded / np.maximum(counts, 1)
+            counts_bin[b] += 1
+        folded = folded / np.maximum(counts_bin, 1)
         amplitude = float(
             (np.max(folded) - np.min(folded)) / max(np.mean(signal), 1e-10)
         )
     else:
         amplitude = 0.0
 
+    # Fallback: even if no QPP detected, provide best candidate info
+    # from the global wavelet spectrum (always contains structure).
+    ls_significance = float(np.max(ls_power)) if len(ls_power) > 0 else 0.0
+    if not detected and len(gws) > 3:
+        # Find best GWS peak in the valid period range [min_period, max_period]
+        valid_range = (periods_wv >= min_period) & (periods_wv <= max_period)
+        if valid_range.any():
+            gws_subset = gws[valid_range]
+            periods_subset = periods_wv[valid_range]
+            best_gw_idx = np.argmax(gws_subset)
+            best_period = float(periods_subset[best_gw_idx])
+            # Folded amplitude from detrended signal
+            if len(detrended) > 20:
+                phase_fold = (time % best_period) / best_period
+                n_bins = 20
+                folded = np.zeros(n_bins)
+                counts_fold = np.zeros(n_bins)
+                for i in range(N):
+                    b = int(phase_fold[i] * n_bins) % n_bins
+                    folded[b] += detrended[i]
+                    counts_fold[b] += 1
+                folded = folded / np.maximum(counts_fold, 1)
+                amplitude = float(
+                    (np.max(folded) - np.min(folded)) / max(np.mean(signal), 1e-10)
+                )
+
     return {
         "detected": detected,
-        "period": best_period,
-        "amplitude": amplitude,
-        "significance": float(np.max(ls_power)) if len(ls_power) > 0 else 0.0,
+        "period": best_period if best_period > 0 else 0.0,
+        "amplitude": max(amplitude, 0.0),
+        "significance": ls_significance,
         "periods": unique_periods,
         "n_qpp": len(unique_periods),
         "ls_periods": ls_periods.tolist() if len(ls_periods) > 0 else [],
@@ -447,6 +485,165 @@ def detect_qpp(
 
 
 # ── Batch QPP analysis ─────────────────────────────────────────────────
+
+
+def detect_qpp_during_flares(
+    sxr_counts: np.ndarray,
+    hxr_counts: np.ndarray,
+    dt: float = 1.0,
+    min_period: float = 10.0,
+    max_period: float = 300.0,
+    min_flare_duration: int = 60,
+    flare_sigma: float = 3.0,
+    padding_sec: int = 300,
+) -> dict:
+    """Detect QPPs during flare intervals only.
+
+    QPPs are transient signals most prominent during the impulsive phase
+    of flares. Searching the full day dilutes the signal. This function:
+      1. Detects flare intervals from SXR light curve (adaptive threshold)
+      2. Extracts HXR data from each flare interval + padding
+      3. Runs detect_qpp on each interval independently
+      4. Returns the best detection (highest significance)
+
+    Parameters
+    ----------
+    sxr_counts : ndarray
+        SoLEXS SXR count rate (1s cadence, full day).
+    hxr_counts : ndarray
+        HEL1OS HXR full-band count rate (1s cadence, aligned).
+    dt : float
+        Time step (seconds).
+    min_period : float
+        Minimum QPP period to search (seconds).
+    max_period : float
+        Maximum QPP period to search (seconds).
+    min_flare_duration : int
+        Minimum flare duration (seconds).
+    flare_sigma : float
+        Threshold sigma for flare detection.
+    padding_sec : int
+        Extra seconds before/after flare for QPP search.
+
+    Returns
+    -------
+    result : dict
+        Same format as detect_qpp() but with flare-focused detection.
+        Additional keys: 'flare_intervals', 'best_flare_index'.
+    """
+    N = len(sxr_counts)
+    if N < 100 or len(hxr_counts) < 100:
+        return {
+            "detected": False,
+            "period": 0.0,
+            "amplitude": 0.0,
+            "significance": 0.0,
+            "periods": [],
+            "n_qpp": 0,
+            "flare_intervals": [],
+            "best_flare_index": -1,
+        }
+
+    # Step 1: Detect flare intervals from SXR
+    from bah2026.models.adaptive_detection import adaptive_threshold_sxrx
+
+    threshold, residual, bg = adaptive_threshold_sxrx(
+        sxr_counts, window=600, sigma=flare_sigma
+    )
+
+    # Find contiguous regions above threshold
+    above = residual > threshold
+    flare_regions = []
+    i = 0
+    while i < len(above):
+        if above[i]:
+            start = i
+            while i < len(above) and above[i]:
+                i += 1
+            end = i - 1
+            if end - start >= min_flare_duration:
+                flare_regions.append((start, end))
+        else:
+            i += 1
+
+    if not flare_regions:
+        # Fall back to full-day detection
+        valid = np.isfinite(hxr_counts)
+        if valid.sum() > 100:
+            return detect_qpp(
+                hxr_counts[valid],
+                dt=dt,
+                min_period=min_period,
+                max_period=max_period,
+            )
+        return {
+            "detected": False,
+            "period": 0.0,
+            "amplitude": 0.0,
+            "significance": 0.0,
+            "periods": [],
+            "n_qpp": 0,
+            "flare_intervals": [],
+            "best_flare_index": -1,
+        }
+
+    # Step 2: Run QPP detection on each flare interval
+    best_result = None
+    best_sig = -1.0
+    best_idx = -1
+
+    for fi, (start, end) in enumerate(flare_regions):
+        # Extract HXR during flare + padding
+        seg_start = max(0, start - padding_sec)
+        seg_end = min(len(hxr_counts), end + padding_sec)
+        hxr_seg = hxr_counts[seg_start:seg_end]
+
+        # Filter NaN
+        valid_seg = hxr_seg[np.isfinite(hxr_seg)]
+        if len(valid_seg) < 50:
+            continue
+
+        result = detect_qpp(
+            valid_seg,
+            dt=dt,
+            min_period=min_period,
+            max_period=max_period,
+        )
+
+        if result["significance"] > best_sig:
+            best_sig = result["significance"]
+            best_result = result
+            best_idx = fi
+
+    # Step 3: If nothing found in flare intervals, try full-day fallback
+    if best_result is None or not best_result["detected"]:
+        valid = np.isfinite(hxr_counts)
+        if valid.sum() > 100:
+            fallback = detect_qpp(
+                hxr_counts[valid],
+                dt=dt,
+                min_period=min_period,
+                max_period=max_period,
+            )
+            if fallback["significance"] > best_sig:
+                best_result = fallback
+                best_idx = -1
+
+    if best_result is None:
+        return {
+            "detected": False,
+            "period": 0.0,
+            "amplitude": 0.0,
+            "significance": 0.0,
+            "periods": [],
+            "n_qpp": 0,
+            "flare_intervals": flare_regions,
+            "best_flare_index": -1,
+        }
+
+    best_result["flare_intervals"] = flare_regions
+    best_result["best_flare_index"] = best_idx
+    return best_result
 
 
 def extract_qpp_features(

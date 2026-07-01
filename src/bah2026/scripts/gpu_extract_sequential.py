@@ -599,7 +599,7 @@ def main():
                 sample_entropy,
                 lagged_cross_correlation,
             )
-            from bah2026.features.qpp import detect_qpp
+            from bah2026.features.qpp import detect_qpp_during_flares
             from bah2026.features.causal_network import extract_causal_network_features
 
             it_keys = [
@@ -681,15 +681,22 @@ def main():
                 except Exception:
                     pass
 
-                # QPP (on full-band HXR, downsampled)
+                # QPP — detect during flare intervals (transient signal)
                 try:
-                    hxr_qpp = hxr_full_1d[np.isfinite(hxr_full_1d)]
-                    if len(hxr_qpp) > 100:
-                        qpp = detect_qpp(hxr_qpp, dt=1.0, min_period=10, max_period=300)
-                        qpp_vals["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
-                        qpp_vals["qpp_period"] = float(qpp["period"])
-                        qpp_vals["qpp_amplitude"] = float(qpp["amplitude"])
-                        qpp_vals["qpp_significance"] = float(qpp["significance"])
+                    qpp = detect_qpp_during_flares(
+                        sxr_day,
+                        hxr_full_1d,
+                        dt=1.0,
+                        min_period=10,
+                        max_period=300,
+                        min_flare_duration=60,
+                        flare_sigma=3.0,
+                        padding_sec=300,
+                    )
+                    qpp_vals["qpp_detected"] = 1.0 if qpp["detected"] else 0.0
+                    qpp_vals["qpp_period"] = float(qpp["period"])
+                    qpp_vals["qpp_amplitude"] = float(qpp["amplitude"])
+                    qpp_vals["qpp_significance"] = float(qpp["significance"])
                 except Exception:
                     pass
 
