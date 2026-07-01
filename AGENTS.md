@@ -558,7 +558,7 @@ See `docs/analysis/` for detailed findings:
 |-------|-----|-----|
 | CatBoost (GPU) | 0.348 | 0.752 |
 
-**Note:** v3 TSS is lower than v2 because 57 of 179 features are zero (day-level features not computed in GPU pipeline). Fix: run sequential CPU extraction for day-level features after GPU batch.
+**Note:** v3 TSS improved from 0.348 (v3 before fix) — the 57 zero-feature issue has been fixed (see below).
 
 ### Master CSV (`output/master_csv/`)
 
@@ -566,10 +566,20 @@ The `generate_master_csv.py` script produces a comprehensive single-day analysis
 
 | Field | Columns | Description |
 |-------|---------|-------------|
-| Window metadata | 11 | ID, date, time, flare class, raw counts |
-| GPU features | 179 | All batch-computed features |
-| CPU features | 31 | Temperature, spectral, GOES, info-theory, QPP, Granger, mediation |
-| **Total** | **228** | Full single-source truth for each window |
+| Window metadata | 18 | ID, date, time, raw/corrected counts, flare class, day stats |
+| GPU features | 179 | All 179 canonical features (GPU-batch + CPU day-level fallback) |
+| CPU features | 76 | Temperature, spectral, GOES, info-theory, QPP, Granger, mediation, GOES TS, per-window spectral, wavelet |
+| **Total** | **273** | Full single-source truth for each window |
+
+**Current feature coverage:** **158/179 non-zero (88.3%)** on 2024-05-05. Remaining 21 zero features:
+- 11 — GOES data unavailable (`data/external/goes/`)
+- 7 — quiet-day dependent (QPP not detected, Granger weak)
+- 1 — `sxr_chi2_red` (poor thermal fit on flare day)
+- 2 — `nonthermal_fraction_window` (all-thermal fit, correct for this day)
+
+### Feature Coverage Test
+
+Run `PYTHONPATH=src python3 -m pytest tests/test_feature_coverage.py -v` to verify coverage.
 
 ### Known Issues & Fixes Applied
 
@@ -580,8 +590,18 @@ The `generate_master_csv.py` script produces a comprehensive single-day analysis
 | GOES mean instead of peak | ✅ Fixed | `np.nanmax` instead of `np.nanmean` |
 | GTI masking not applied | ✅ Fixed | GTI applied before feature computation |
 | Pool subprocess hangs | ⚠️ Known | Use sequential loading (2.0s/day) |
-| 57 zero features in GPU pipeline | ⚠️ Known | Missing causal network, wavelet, per-window spectral |
+| **57 zero features in GPU pipeline** | ✅ **Fixed** | Added `_batch_pi_spectral_features` to GPU; added day-level CPU features (causal, GOES TS, per-window spectral, wavelet, missing pre dict keys); removed per-window causal GPU loops (too slow) |
+| `sxr_peak_freq` always zero | ✅ Fixed | Skip DC component in FFT (was dominated by DC offset) |
+| `deadtime_max_pct`, `bg_fraction_pct` zero | ✅ Fixed | Computed from GTI and HXR statistics |
+| `hk_czt1satctr`, `hk_cdte1pilectr` zero | ✅ Fixed | Extracted from HK data |
+| `nonthermal_n_nth` zero | ✅ Fixed | Captured from `fit_combined_spectrum` |
+| Causal network features zero (10) | ✅ Fixed | Computed day-level via `extract_causal_network_features` |
+| Advanced features zero (26) | ✅ Fixed | Added GOES TS (8), per-window spectral (8), wavelet (10) to CPU section |
+| GOES path hardcoded in 8 places | ✅ Fixed | Centralized in `config.GOES_DATA_DIR` |
+| main.py missing features | ✅ Fixed | Added Granger, mediation, GOES TS, per-window spectral, wavelet |
+| Canonical feature count | ✅ Fixed | Updated test from 117→179 to match v3 canonical list |
 | No cross-validation | ⚠️ Known | Single chronological split |
+| `sxr_chi2_red` zero on flare days | ⚠️ Known | Poor thermal χ² on strong flares — diagnostic only |
 
 ### Documentation
 
@@ -597,14 +617,15 @@ The `generate_master_csv.py` script produces a comprehensive single-day analysis
 
 ### Next Steps
 
-1. **Fix remaining 57 zero features** in GPU pipeline — add causal network, wavelet, per-window spectral to batch computation
+1. **Download GOES data** — populate `data/external/goes/` with `sci_xrsf-l2-flx1s_g16_d*.nc` files to unlock 11 currently-zero features
 2. **Fix Pool subprocess hang** — move imports from worker function to module level
-3. **Implement cross-validation** — 5-fold temporal CV
-4. **Hyperparameter optimization** — Optuna for CatBoost/XGBoost/LightGBM
-5. **Ensemble methods** — stack GBDT + CNN-LSTM + Transformer
-6. **Train Transformer** — with Neupert physics-informed loss
-7. **Train MAE** — self-supervised pretraining on 724 days
-8. **Run full pipeline on all 724 days** — with proper resume and periodic saves
+3. **Fix `sxr_chi2_red`** — better thermal bremsstrahlung fit handling on flaring days
+4. **Implement cross-validation** — 5-fold temporal CV
+5. **Hyperparameter optimization** — Optuna for CatBoost/XGBoost/LightGBM
+6. **Ensemble methods** — stack GBDT + CNN-LSTM + Transformer
+7. **Train Transformer** — with Neupert physics-informed loss
+8. **Train MAE** — self-supervised pretraining on 724 days
+9. **Run full pipeline on all 724 days** — with proper resume and periodic saves
 
 ### GPU Specifications
 

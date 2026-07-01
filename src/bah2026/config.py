@@ -94,6 +94,12 @@ CNNLSTM_LR = 1e-3
 CNNLSTM_EPOCHS = 50
 CNNLSTM_BATCH_SIZE = 64
 
+# ── External Data Paths ─────────────────────────────────────────────────────
+
+GOES_DATA_DIR = Path(
+    os.environ.get("BAH2026_GOES_DIR", str(PROJECT_ROOT / "data" / "external" / "goes"))
+)
+
 # ── Parallelism ──────────────────────────────────────────────────────────
 
 N_WORKERS = int(os.environ.get("BAH2026_WORKERS", min(os.cpu_count() or 4, 24)))

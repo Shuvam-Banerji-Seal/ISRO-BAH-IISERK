@@ -111,7 +111,13 @@ def _batch_spectral_entropy(windows: torch.Tensor) -> dict[str, torch.Tensor]:
         p = psd / total
         entropy = -(p * (p + 1e-30).log()).sum(dim=-1)
         feats["sxr_spec_entropy"] = entropy.mean(dim=1)
-        feats["sxr_peak_freq"] = psd.argmax(dim=-1).float().mean(dim=1) / nperseg
+        # Skip DC component (index 0) — DC dominates on solar data with offset
+        if psd.shape[-1] > 1:
+            feats["sxr_peak_freq"] = (psd[:, :, 1:].argmax(dim=-1) + 1).float().mean(
+                dim=1
+            ) / nperseg
+        else:
+            feats["sxr_peak_freq"] = torch.zeros(B, device=_DEVICE)
     except Exception:
         feats["sxr_spec_entropy"] = torch.zeros(B, device=_DEVICE)
         feats["sxr_peak_freq"] = torch.zeros(B, device=_DEVICE)

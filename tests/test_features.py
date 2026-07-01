@@ -141,9 +141,9 @@ def test_extract_features_new_categories():
 
 
 def test_canonical_feature_count():
-    """Canonical feature set has expected number of features (v2: 104 + 13 causal)."""
+    """Canonical feature set has expected number of features (v3: 117 basic + 62 advanced)."""
     names = get_canonical_feature_names()
-    assert len(names) == 117
+    assert len(names) == 179
     # All names are unique
     assert len(names) == len(set(names))
     # All names are sorted

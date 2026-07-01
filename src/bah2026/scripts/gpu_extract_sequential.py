@@ -271,8 +271,9 @@ def _worker_load(args):
         try:
             from pathlib import Path
 
-            gdir = Path(__file__).resolve().parents[3] / "data" / "external" / "goes"
-            for nc_file in gdir.glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
+            from bah2026.config import GOES_DATA_DIR as _goes_dir
+
+            for nc_file in Path(_goes_dir).glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
                 from netCDF4 import Dataset as NCDataset
 
                 with NCDataset(str(nc_file), "r") as nc:

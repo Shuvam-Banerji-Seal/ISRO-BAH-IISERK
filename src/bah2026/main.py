@@ -40,6 +40,7 @@ from bah2026.config import (
     FEATURE_FORECAST_WINDOW_SEC,
     FORECAST_TRAIN_RATIO,
     FORECAST_VAL_RATIO,
+    GOES_DATA_DIR,
     has_gpu,
     gpu_info,
     ensure_output_dirs,
@@ -379,8 +380,7 @@ def _process_day_features(
     # ── GOES XRS-B + XRS-A flux ──────────────────────────────────
     goes_xrsb, goes_xrsa, goes_ratio = 0.0, 0.0, 0.0
     try:
-        gdir = DATA_ROOT.parent / "external" / "goes"
-        for nc_file in gdir.glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
+        for nc_file in GOES_DATA_DIR.glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
             from netCDF4 import Dataset
 
             with Dataset(str(nc_file), "r") as nc:
@@ -420,9 +420,16 @@ def _process_day_features(
                     )
                     if goes_xrsb > 0:
                         goes_ratio = goes_xrsa / goes_xrsb
+                    # Save full arrays for GOES time-series features
+                    goes_xrsb_arr = gf_b.copy()
+                    goes_xrsa_arr = gf_a.copy()
+                else:
+                    goes_xrsb_arr = None
+                    goes_xrsa_arr = None
             break
     except Exception:
-        pass
+        goes_xrsb_arr = None
+        goes_xrsa_arr = None
 
     # ── Build precomputed features dict ───────────────────────────
     precomputed = {
@@ -455,6 +462,199 @@ def _process_day_features(
                     precomputed[f"{prefix}_total_mean"] = float(np.mean(v))
                     precomputed[f"{prefix}_total_max"] = float(np.max(v))
                     precomputed[f"{prefix}_total_std"] = float(np.std(v))
+
+    # Missing HK features (saturation/pile-up counters)
+    for hk_key_m, pre_key_m in [
+        ("czt1satctr1", "hk_czt1satctr"),
+        ("cdte1pilectr", "hk_cdte1pilectr"),
+    ]:
+        try:
+            if hk_key_m in hk and len(hk[hk_key_m]) > 0:
+                vals = hk[hk_key_m][np.isfinite(hk[hk_key_m])]
+                precomputed[pre_key_m] = float(np.max(vals)) if len(vals) > 0 else 0.0
+        except Exception:
+            precomputed[pre_key_m] = 0.0
+
+    # ── Causal network features (Granger + mediation) ─────────────
+    for ck in [
+        "causal_network_density",
+        "avg_in_degree",
+        "avg_out_degree",
+        "avg_centrality",
+        "n_feedback_loops",
+        "cycle_detected",
+        "hxr_to_sxr_lag",
+        "hxr_to_sxr_strength",
+        "sxr_to_hxr_lag",
+        "sxr_to_hxr_strength",
+        "neupert_granger_improvement",
+        "neupert_best_lag",
+        "max_mediation_proportion",
+    ]:
+        precomputed[ck] = 0.0
+
+    try:
+        from sklearn.linear_model import RidgeCV
+        from sklearn.model_selection import TimeSeriesSplit
+        from sklearn.metrics import r2_score
+
+        hxr_full_bg = combined_hxr[:, 4] if combined_hxr is not None else None
+        if hxr_full_bg is not None:
+            valid_gc = np.isfinite(counts) & np.isfinite(hxr_full_bg)
+            if valid_gc.sum() > 500:
+                best_imp, best_lag_val = 0.0, 0
+                tscv = TimeSeriesSplit(n_splits=3)
+                gc_hxr = hxr_full_bg[valid_gc]
+                gc_sxr = counts[valid_gc]
+                n_gc = len(gc_hxr)
+                for lag in [1, 5, 10, 20, 30, 60]:
+                    if lag > n_gc // 4:
+                        continue
+                    X_r = np.column_stack(
+                        [gc_sxr[lag - j - 1 : n_gc - j - 1] for j in range(lag)]
+                    )
+                    X_f = np.column_stack(
+                        [gc_sxr[lag - j - 1 : n_gc - j - 1] for j in range(lag)]
+                        + [gc_hxr[lag - j - 1 : n_gc - j - 1] for j in range(lag)]
+                    )
+                    y_gc = gc_sxr[lag:]
+                    if len(y_gc) < lag * 2:
+                        continue
+                    r2_r_sum, r2_f_sum, nf = 0.0, 0.0, 0
+                    for tr, te in tscv.split(X_r):
+                        if len(te) < 5:
+                            continue
+                        try:
+                            m_r = RidgeCV(alphas=[0.1, 1.0, 10.0]).fit(
+                                X_r[tr], y_gc[tr]
+                            )
+                            m_f = RidgeCV(alphas=[0.1, 1.0, 10.0]).fit(
+                                X_f[tr], y_gc[tr]
+                            )
+                            r2_r_sum += r2_score(y_gc[te], m_r.predict(X_r[te]))
+                            r2_f_sum += r2_score(y_gc[te], m_f.predict(X_f[te]))
+                            nf += 1
+                        except Exception:
+                            continue
+                    if nf > 0:
+                        imp = r2_f_sum / nf - r2_r_sum / nf
+                        if imp > best_imp:
+                            best_imp, best_lag_val = imp, lag
+                precomputed["neupert_granger_improvement"] = best_imp
+                precomputed["neupert_best_lag"] = float(best_lag_val)
+    except Exception:
+        pass
+
+    # Mediation analysis
+    try:
+        from bah2026.features.causal_network import mediation_analysis
+
+        if combined_hxr is not None and combined_hxr.shape[1] >= 7:
+            treatment_med = combined_hxr[:, 1]  # CZT 40-60 keV
+            mediator_med = combined_hxr[:, 6]  # CdTe 20-30 keV
+            outcome_med = counts
+            valid_med = (
+                np.isfinite(treatment_med)
+                & np.isfinite(mediator_med)
+                & np.isfinite(outcome_med)
+            )
+            if valid_med.sum() > 50:
+                ma = mediation_analysis(
+                    treatment_med[valid_med],
+                    mediator_med[valid_med],
+                    outcome_med[valid_med],
+                )
+                precomputed["max_mediation_proportion"] = ma.get(
+                    "mediation_proportion", 0.0
+                )
+    except Exception:
+        pass
+
+    # ── Advanced features: GOES TS (8) + per-window spectral (8) + wavelet (10) ──
+    try:
+        from bah2026.features.advanced_features import (
+            extract_goes_timeseries_features,
+            extract_per_window_spectral,
+            extract_wavelet_scalogram_features,
+        )
+
+        # GOES time-series (full arrays captured in GOES loading above)
+        _goes_xrsb_arr = locals().get("goes_xrsb_arr", None)
+        _goes_xrsa_arr = locals().get("goes_xrsa_arr", None)
+        goes_feats = extract_goes_timeseries_features(_goes_xrsb_arr, _goes_xrsa_arr)
+        precomputed.update(goes_feats)
+
+        if _goes_xrsb_arr is not None:
+            valid_goes = _goes_xrsb_arr[np.isfinite(_goes_xrsb_arr)]
+            c_threshold = 1e-6
+            precomputed["goes_flare_history_24h"] = float(
+                np.sum(valid_goes > c_threshold)
+            )
+            peak_val = np.nanmax(valid_goes) if len(valid_goes) > 0 else 0.0
+            if peak_val > 0 and len(valid_goes) > 0:
+                precomputed["goes_xrsb_prev_peak_ratio"] = float(
+                    valid_goes[-1] / peak_val
+                )
+
+        # Per-window spectral (reload from disk — cleanest for scope)
+        _pi_reload = None
+        try:
+            _p = load_solexs_pi(d)
+            if _p["counts"].size > 0:
+                _pi_reload = np.nansum(_p["counts"], axis=0)
+        except Exception:
+            pass
+        _czt_reload = None
+        try:
+            _c = load_hel1os_spectra(d, detector="czt", num=1)
+            if _c["counts"].size > 0:
+                _czt_reload = (
+                    np.nansum(_c["counts"][:100, :], axis=0)
+                    if _c["counts"].ndim == 2
+                    else _c["counts"]
+                )
+        except Exception:
+            pass
+        _cdte_reload = None
+        try:
+            _c2 = load_hel1os_spectra(d, detector="cdte", num=1)
+            if _c2["counts"].size > 0:
+                _cdte_reload = (
+                    np.nansum(_c2["counts"][:100, :], axis=0)
+                    if _c2["counts"].ndim == 2
+                    else _c2["counts"]
+                )
+        except Exception:
+            pass
+
+        _prev_gamma = precomputed.get("hxr_spectral_index_gamma", 0.0)
+        pw_spec = extract_per_window_spectral(
+            _pi_reload,
+            _czt_reload,
+            _cdte_reload,
+            channel_energies=None,
+            prev_gamma=_prev_gamma,
+        )
+        precomputed.update(pw_spec)
+        if pw_spec.get("nonthermal_fraction_window", 0.0) == 0.0:
+            tf_adv = float(np.clip(precomputed.get("thermal_fraction", 0.0), 0.0, 1.0))
+            precomputed["nonthermal_fraction_window"] = float(max(0.0, 1.0 - tf_adv))
+
+        # Wavelet scalogram
+        _hxr_full_1d = (
+            combined_hxr[:, 4]
+            if combined_hxr is not None and combined_hxr.shape[1] > 4
+            else combined_hxr[:, 0]
+            if combined_hxr is not None
+            else None
+        )
+        if _hxr_full_1d is not None:
+            wavelet_feats = extract_wavelet_scalogram_features(
+                counts, dt=1.0, hxr_signal=_hxr_full_1d.astype(np.float64)
+            )
+            precomputed.update(wavelet_feats)
+    except Exception:
+        pass
 
     # ── Sliding window feature extraction ─────────────────────────
     lookback, step = FEATURE_LOOKBACK_SEC, FEATURE_STEP_SEC

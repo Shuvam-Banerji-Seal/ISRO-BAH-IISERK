@@ -9,6 +9,7 @@ warnings.filterwarnings("ignore")
 import torch, pandas as pd
 from datetime import date, timedelta, datetime
 from pathlib import Path
+from bah2026.config import GOES_DATA_DIR
 
 TARGET_DATE = date(2024, 5, 5)
 OUT = Path("output/master_csv")
@@ -39,6 +40,10 @@ from bah2026.features.gpu_features import (
     _batch_neupert,
     _batch_hxr_features,
     _batch_pi_channel_features,
+    _batch_pi_spectral_features,
+    _batch_causal,
+    _batch_info_theory,
+    _batch_qpp,
     FEATURE_AUTOCORR_LAGS,
     get_canonical_feature_names,
 )
@@ -57,6 +62,11 @@ from bah2026.models.adaptive_detection import (
     classify_solexs_helios,
 )
 from bah2026.data.calibration import load_channel_energies
+from bah2026.features.advanced_features import (
+    extract_goes_timeseries_features,
+    extract_per_window_spectral,
+    extract_wavelet_scalogram_features,
+)
 
 print("Loading data...", flush=True)
 t0 = time.time()
@@ -101,10 +111,9 @@ for det, num in [("czt", 1), ("czt", 2), ("cdte", 1), ("cdte", 2)]:
 
 goes_xrsb_arr = goes_xrsa_arr = None
 try:
-    from pathlib import Path as P
     from netCDF4 import Dataset as NCD
 
-    for nc in P("data/external/goes").glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
+    for nc in Path(GOES_DATA_DIR).glob(f"*g16_d{d.strftime('%Y%m%d')}_v*.nc"):
         with NCD(str(nc), "r") as nc:
             goes_xrsb_arr = np.where(
                 nc.variables["xrsb_flux"][:] < 0, np.nan, nc.variables["xrsb_flux"][:]
@@ -156,6 +165,9 @@ feats_gpu.update(_batch_multiscale(sxr_g, hxr_g))
 feats_gpu.update(_batch_neupert(sxr_g, hxr_g))
 feats_gpu.update(_batch_hxr_features(hxr_g))
 feats_gpu.update(_batch_pi_channel_features(pi_g))
+feats_gpu.update(_batch_pi_spectral_features(hxr_g))
+# Note: causal / info-theory / QPP are computed once per-day in CPU section below
+# (GPU per-window loops too slow; same strategy as multi-day pipeline)
 torch.cuda.synchronize()
 print(f"  GPU features: {len(feats_gpu)} features, {time.time() - t0:.1f}s", flush=True)
 
@@ -204,6 +216,7 @@ try:
     )
     pre["nonthermal_gamma"] = sep.get("gamma", 0.0)
     pre["nonthermal_ec"] = sep.get("ec", 0.0)
+    pre["nonthermal_n_nth"] = sep.get("n_nth", 0.0)
     pre["thermal_fraction"] = float(np.clip(sep.get("thermal_fraction", 0.0), 0.0, 1.0))
 except:
     pass
@@ -269,6 +282,168 @@ valid = np.isfinite(hxr_v) & np.isfinite(med_v) & np.isfinite(out_v)
 if valid.sum() > 50:
     ma = mediation_analysis(hxr_v[valid], med_v[valid], out_v[valid])
     pre["max_mediation_proportion"] = ma.get("mediation_proportion", 0.0)
+
+# ── Missing pre dict keys ────────────────────────────────────────────
+# Deadtime percentage from GTI
+try:
+    if gti.size > 0 and len(time_s) > 1:
+        total_span = time_s[-1] - time_s[0]
+        good_time = np.sum(gti[:, 1] - gti[:, 0])
+        pre["deadtime_max_pct"] = float(
+            max(0.0, min(100.0, (1.0 - good_time / max(total_span, 1e-6)) * 100.0))
+        )
+    else:
+        pre["deadtime_max_pct"] = 0.0
+except Exception:
+    pre["deadtime_max_pct"] = 0.0
+
+# Background fraction from HXR full-band
+try:
+    hxr_full_bg = hxr4_combined[:, 4]
+    valid_hxr_bg = hxr_full_bg[np.isfinite(hxr_full_bg)]
+    if len(valid_hxr_bg) > 0:
+        median_val = np.median(valid_hxr_bg)
+        bg_threshold = max(median_val * 1.1, 0.1)
+        pre["bg_fraction_pct"] = float(np.mean(valid_hxr_bg < bg_threshold) * 100.0)
+    else:
+        pre["bg_fraction_pct"] = 0.0
+except Exception:
+    pre["bg_fraction_pct"] = 0.0
+
+# Missing HK features (saturation/pile-up counters)
+for hk_key, pre_key in [
+    ("czt1satctr1", "hk_czt1satctr"),
+    ("cdte1pilectr", "hk_cdte1pilectr"),
+]:
+    try:
+        if hk_key in hk and len(hk[hk_key]) > 0:
+            vals = hk[hk_key][np.isfinite(hk[hk_key])]
+            pre[pre_key] = float(np.max(vals)) if len(vals) > 0 else 0.0
+        else:
+            pre[pre_key] = 0.0
+    except Exception:
+        pre[pre_key] = 0.0
+
+# Sample entropy HXR (complement to existing sample_entropy_sxr)
+try:
+    hxr_se = hxr4_combined[::ds2, 4].astype(np.float32)
+    valid_hxr_se = hxr_se[np.isfinite(hxr_se)]
+    if len(valid_hxr_se) > 50:
+        pre["sample_entropy_hxr"] = float(
+            sample_entropy(valid_hxr_se[:200], m=2, r_factor=0.2)
+        )
+    else:
+        pre["sample_entropy_hxr"] = 0.0
+except Exception:
+    pre["sample_entropy_hxr"] = 0.0
+
+# ── CZT2 / CdTe2 day-level features ──────────────────────────────────
+try:
+    czt2_full = hxr4_combined[:, 9]
+    cdte2_full = hxr4_combined[:, 19]
+    for prefix, arr in [("czt2", czt2_full), ("cdte2", cdte2_full)]:
+        valid_arr = arr[np.isfinite(arr) & (arr > 0)]
+        if len(valid_arr) > 0:
+            pre[f"{prefix}_total_mean"] = float(np.mean(valid_arr))
+            pre[f"{prefix}_total_max"] = float(np.max(valid_arr))
+            pre[f"{prefix}_total_std"] = float(np.std(valid_arr))
+        else:
+            pre[f"{prefix}_total_mean"] = 0.0
+            pre[f"{prefix}_total_max"] = 0.0
+            pre[f"{prefix}_total_std"] = 0.0
+except Exception:
+    for prefix in ["czt2", "cdte2"]:
+        for stat in ["total_mean", "total_max", "total_std"]:
+            pre.setdefault(f"{prefix}_{stat}", 0.0)
+
+# ── Advanced features: GOES time-series (8) ──────────────────────────
+try:
+    goes_feats = extract_goes_timeseries_features(goes_xrsb_arr, goes_xrsa_arr)
+    pre.update(goes_feats)
+
+    # GOES supplementary (flare count, prev peak ratio)
+    if goes_xrsb_arr is not None:
+        valid_goes = goes_xrsb_arr[np.isfinite(goes_xrsb_arr)]
+        c_threshold = 1e-6
+        flare_mask = valid_goes > c_threshold
+        pre["goes_flare_history_24h"] = float(np.sum(flare_mask))
+        peak_val = np.nanmax(valid_goes) if len(valid_goes) > 0 else 0.0
+        if peak_val > 0 and len(valid_goes) > 0:
+            pre["goes_xrsb_prev_peak_ratio"] = float(valid_goes[-1] / peak_val)
+except Exception:
+    pass
+
+# ── Advanced features: Per-window spectral (8) ───────────────────────
+try:
+    czt_spec_data = specs.get("czt1", {}).get("counts") if "czt1" in specs else None
+    cdte_spec_data = specs.get("cdte1", {}).get("counts") if "cdte1" in specs else None
+    prev_gamma = pre.get("hxr_spectral_index_gamma", 0.0)
+    pw_spec = extract_per_window_spectral(
+        pi_sum if pi_sum is not None else None,
+        czt_spec_data,
+        cdte_spec_data,
+        channel_energies=None,
+        prev_gamma=prev_gamma,
+    )
+    pre.update(pw_spec)
+    # Fallback for nonthermal_fraction_window
+    if pw_spec.get("nonthermal_fraction_window", 0.0) == 0.0:
+        tf_sep = float(np.clip(pre.get("thermal_fraction", 0.0), 0.0, 1.0))
+        pre["nonthermal_fraction_window"] = float(max(0.0, 1.0 - tf_sep))
+except Exception:
+    pass
+
+# ── Advanced features: Wavelet scalogram (10) ────────────────────────
+try:
+    hxr_full_1d = (
+        hxr4_combined[:, 4] if hxr4_combined.shape[1] > 4 else hxr4_combined[:, 0]
+    )
+    wavelet_feats = extract_wavelet_scalogram_features(
+        counts, dt=1.0, hxr_signal=hxr_full_1d.astype(np.float64)
+    )
+    pre.update(wavelet_feats)
+except Exception:
+    pass
+
+# ── Causal network features (day-level) ──────────────────────────────
+causal_keys = [
+    "causal_network_density",
+    "avg_in_degree",
+    "avg_out_degree",
+    "avg_centrality",
+    "n_feedback_loops",
+    "cycle_detected",
+    "hxr_to_sxr_lag",
+    "hxr_to_sxr_strength",
+    "sxr_to_hxr_lag",
+    "sxr_to_hxr_strength",
+]
+for k in causal_keys:
+    pre.setdefault(k, 0.0)
+try:
+    from bah2026.features.causal_network import extract_causal_network_features
+
+    valid_mask = np.isfinite(counts) & np.isfinite(hxr4_combined[:, 4])
+    if valid_mask.sum() > 200:
+        ds_c = 10
+        band_data = {
+            "SXR": counts[valid_mask][::ds_c],
+            "CZT20": hxr4_combined[valid_mask, 0][::ds_c],
+            "CZT40": hxr4_combined[valid_mask, 1][::ds_c],
+            "CZT60": hxr4_combined[valid_mask, 2][::ds_c],
+            "CZT80": hxr4_combined[valid_mask, 3][::ds_c],
+            "CZT160": hxr4_combined[valid_mask, 4][::ds_c],
+        }
+        if hxr4_combined.shape[1] > 5:
+            band_data["CdTe5"] = hxr4_combined[valid_mask, 5][::ds_c]
+            band_data["CdTe20"] = hxr4_combined[valid_mask, 6][::ds_c]
+        cn = extract_causal_network_features(band_data, max_lag=20)
+        for k in causal_keys:
+            if k in cn:
+                pre[k] = cn[k]
+except Exception:
+    pass
+
 print(f"  CPU features: {len(pre)} features", flush=True)
 
 # ═══════════════════════════════════════════════════════════
