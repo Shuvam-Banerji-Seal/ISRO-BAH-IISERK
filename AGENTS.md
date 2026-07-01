@@ -443,3 +443,177 @@ See `docs/analysis/` for detailed findings:
 | CdTe DETCHANS verified | **511** |
 | LC rows uniform | **86,400/day** (SoLEXS, all 747 files) |
 | Raw↔Processed mapping | **0 orphans** (both datasets) |
+
+---
+
+## Current Implementation State (v3 — July 2026)
+
+### On Session Start, you MUST:
+1. **Read this file** (AGENTS.md) — understand the full scope
+2. **Read `README.md`** — Mermaid diagrams showing pipeline, data flow, classification, architecture
+3. **Read `docs/PLAN.md`** — research plan, mathematical framework, v3 improvement plan
+4. **Read `src/bah2026/`** — all modules listed below
+5. **Check `output/`** — existing results (CSVs, models, feature matrices)
+6. **Run `pytest tests/ -v`** — verify all 50+ tests pass
+7. **Check `git log --oneline -20`** — recent commit history
+
+### Codebase Architecture
+
+#### Data Layer (`src/bah2026/data/`)
+
+| File | Purpose | Key Functions |
+|------|---------|---------------|
+| `reader.py` | FITS readers | `load_solexs_lc()`, `load_solexs_pi()`, `load_solexs_gti()`, `load_hel1os_lc()`, `load_hel1os_spectra()`, `load_hel1os_hk()`, `discover_combined_days()` |
+| `corrections.py` | Instrument corrections | `correct_solexs_deadtime()` (paralyzable, τ=13.65µs), `subtract_hel1os_background()` (CZT=70cps, CdTe=0.15cps), `subtract_solexs_spurious()` |
+| `preprocessing.py` | Temporal alignment | `align_hel1os_to_solexs()` (interpolation), `compute_gti_mask()`, `forward_fill_nan()` |
+| `calibration.py` | SoLEXS→GOES | `load_channel_energies()`, `solexs_counts_to_irradiance_simple()`, `classify_goes()`, `load_arf()`, `load_rmf()` |
+| `ground_truth.py` | GOES validation | `load_swpc_flares()`, `validate_nowcasting()`, `parse_goes_class()` |
+| `sequence_builder.py` | DL sequence data | `build_day_sequence()` → (12, 86400), `SequenceDataset` (mmap-backed), `create_dataloaders()`, `prepare_downsampled_sequences()` |
+
+#### Feature Engineering (`src/bah2026/features/`)
+
+| File | Features | Description |
+|------|----------|-------------|
+| `engineering.py` | 179 (canonical) | Master feature list, `extract_features_window()`, `get_canonical_feature_names()`, `pad_features_to_canonical()` |
+| `gpu_features.py` | 119 | **GPU batch** (A100): `_batch_stats()`, `_batch_acf()`, `_batch_spectral_entropy()`, `_batch_derivative_features()`, `_batch_multiscale()`, `_batch_neupert()`, `_batch_hxr_features()`, `_batch_pi_channel_features()` |
+| `advanced_features.py` | 62 | Temporal derivatives, multiscale (5/15/30min), GOES TS, per-window spectral, wavelet scalogram |
+| `information_theory.py` | 6 | `transfer_entropy()`, `mutual_information()`, `sample_entropy()`, `lagged_cross_correlation()` |
+| `spectral_fitting.py` | 3+ | `fit_temperature()` (thermal bremsstrahlung), `fit_spectral_index()` (power-law), `compute_hardness_ratio()`, `neupert_correlation()` |
+| `non_thermal.py` | 4 | `thick_target_spectrum()`, `fit_non_thermal()`, `separate_thermal_non_thermal()`, `fit_combined_spectrum()` |
+| `causal_network.py` | 13 | `granger_causality_simple()` (AR+RidgeCV+TimeSeriesSplit), `mediation_analysis()` (Baron-Kenny), `build_causal_network()`, `extract_causal_network_features()` |
+| `qpp.py` | 4 | `detect_qpp()` (wavelet+Lomb-Scargle), `wavelet_power_auto()` (GPU auto-select), `lomb_scargle_periodogram()` |
+| `response_convolution.py` | — | `build_response_matrix()`, `deconvolve_spectrum()` (NNLS, Richardson-Lucy) |
+
+#### Models (`src/bah2026/models/`)
+
+| File | Architecture | Description |
+|------|-------------|-------------|
+| `nowcasting.py` | SWPC detection | `detect_flares_swpc()` (4-min monotonic rise), `detect_flares_hel1os()`, `coincidence_merge()` |
+| `adaptive_detection.py` | **New** | `adaptive_threshold_sxrx()` (global MAD), `detect_flares_adaptive()` (3σ), `classify_solexs_helios()` (combined SXR+HXR classification) |
+| `forecasting.py` | LightGBM + XGBoost + CatBoost | `FlareForecasterLightGBM`, `FlareForecasterXGBoost`, `FlareForecasterCatBoost` (GPU), `FlareForecasterCNNLSTM` |
+| `cnn_lstm_v3.py` | **3.0M params** | CNN-LSTM v3: 4×Conv1D→BiLSTM→TemporalAttention→MLP, FocalLoss, mixed precision, rolling-origin CV |
+| `transformer.py` | **3.7M params** | Spectral-Temporal Transformer: temporal self-attention + energy cross-attention, Neupert physics-informed loss (`NeupertLoss`), FlashAttention, MC Dropout |
+| `mae_pretrain.py` | **5.6M params** | Masked Autoencoder: 6-layer encoder + 4-layer decoder, 50% masking, self-supervised pretraining on quiet-sun |
+
+#### Scripts (`src/bah2026/scripts/`)
+
+| Script | Purpose |
+|--------|---------|
+| `run_full_pipeline.py` | v2 complete pipeline (nowcast + features + forecast) |
+| `gpu_extract_sequential.py` | v3 GPU-accelerated feature extraction with resume logic |
+| `build_sequences.py` | 12-channel sequence data preparation |
+| `generate_master_csv.py` | **New** — single-day master CSV (277×228) with ALL features, analysis, classification |
+| `verify_pipeline.py` | Pipeline verification tests |
+| `analysis_deep.py` | 10-section deep data exploration |
+
+### Feature Computation (179 total)
+
+| Category | Count | Computation | GPU? |
+|----------|-------|-------------|------|
+| SXR statistics | 15 | `_batch_stats` | ✅ GPU |
+| HXR band features | 30 | `_batch_hxr_features` | ✅ GPU |
+| Hardness evolution | 3 | `_batch_hxr_features` | ✅ GPU |
+| Derivatives (dSXR/dt, etc.) | 12 | `_batch_derivative_features` | ✅ GPU |
+| Multiscale (5/15/30min) | 24 | `_batch_multiscale` | ✅ GPU |
+| SXR ACF | 4 | `_batch_acf` | ✅ GPU |
+| Spectral entropy | 2 | `_batch_spectral_entropy` | ✅ GPU |
+| Neupert correlation | 2 | `_batch_neupert` | ✅ GPU |
+| PI channel features | 15 | `_batch_pi_channel_features` | ✅ GPU |
+| Cross-detector stats | 14 | `_batch_pi_spectral_features` | ✅ GPU |
+| Temperature, EM, χ² | 3 | `fit_temperature` | ❌ CPU |
+| Spectral indices (4 det) | 4 | `fit_spectral_index` | ❌ CPU |
+| Non-thermal (γ, E_c, N_nth) | 4 | `fit_combined_spectrum` | ❌ CPU |
+| GOES flux | 3 | GOES netCDF | ❌ CPU |
+| HK features | 8 | `load_hel1os_hk` | ❌ CPU |
+| Transfer entropy | 6 | `information_theory` | ❌ CPU |
+| QPP detection | 4 | `detect_qpp` | ❌ CPU |
+| Granger causality | 2 | `granger_causality_simple` | ❌ CPU |
+| Mediation | 1 | `mediation_analysis` | ❌ CPU |
+| Correction stats | 2 | deadtime + bg | ❌ CPU |
+| **Total** | **179** | | |
+
+### Analysis Results
+
+#### Adaptive Flare Detection (May 5, 2024)
+
+| Metric | Aditya-L1 | GOES Catalog | Match? |
+|--------|-----------|-------------|--------|
+| X-class flares | 2 | 2 | ✅ |
+| M-class flares | 3 | 8 | ⚠️ timing offset |
+| C-class flares | 4 | 4 | ✅ |
+| HXR confirmed | 8/9 (89%) | N/A | ✅ |
+| False positives | 0 | N/A | ✅ |
+
+#### Model Performance
+
+| Model | TSS | HSS | AUC-ROC | AUC-PR | F1 | Train Time |
+|-------|-----|-----|---------|--------|----|------------|
+| CatBoost (GPU) | **0.412** | 0.110 | 0.795 | 0.289 | 0.160 | 40s |
+| XGBoost (CPU) | 0.371 | 0.085 | 0.783 | 0.268 | 0.138 | 108s |
+| LightGBM (CPU) | 0.331 | 0.067 | 0.736 | 0.242 | 0.122 | 7s |
+
+#### v3 Optimized (GPU pipeline, 158,998 windows × 179 features)
+
+| Model | TSS | AUC |
+|-------|-----|-----|
+| CatBoost (GPU) | 0.348 | 0.752 |
+
+**Note:** v3 TSS is lower than v2 because 57 of 179 features are zero (day-level features not computed in GPU pipeline). Fix: run sequential CPU extraction for day-level features after GPU batch.
+
+### Master CSV (`output/master_csv/`)
+
+The `generate_master_csv.py` script produces a comprehensive single-day analysis CSV:
+
+| Field | Columns | Description |
+|-------|---------|-------------|
+| Window metadata | 11 | ID, date, time, flare class, raw counts |
+| GPU features | 179 | All batch-computed features |
+| CPU features | 31 | Temperature, spectral, GOES, info-theory, QPP, Granger, mediation |
+| **Total** | **228** | Full single-source truth for each window |
+
+### Known Issues & Fixes Applied
+
+| Issue | Status | Fix |
+|-------|--------|-----|
+| fit_temperature returns T=10.0 MK always | ✅ Fixed | EM bounds capped, chi2 capped |
+| thermal_fraction > 1.0 | ✅ Fixed | `np.clip(0, 1)` |
+| GOES mean instead of peak | ✅ Fixed | `np.nanmax` instead of `np.nanmean` |
+| GTI masking not applied | ✅ Fixed | GTI applied before feature computation |
+| Pool subprocess hangs | ⚠️ Known | Use sequential loading (2.0s/day) |
+| 57 zero features in GPU pipeline | ⚠️ Known | Missing causal network, wavelet, per-window spectral |
+| No cross-validation | ⚠️ Known | Single chronological split |
+
+### Documentation
+
+| File | Content |
+|------|---------|
+| `AGENTS.md` | This file — problem statement + implementation summary |
+| `README.md` | Project overview with Mermaid diagrams (pipeline, data flow, classification, architecture) |
+| `docs/PLAN.md` | Comprehensive research plan + v3 improvement plan |
+| `docs/RESULTS.md` | Detailed analysis results and model performance |
+| `docs/analysis/` | Data exploration, pipeline designs, coverage analysis |
+| `docs/research/` | Literature review (5 research notes) |
+| `docs/IMPLEMENTED.md` | Implementation status vs plan |
+
+### Next Steps
+
+1. **Fix remaining 57 zero features** in GPU pipeline — add causal network, wavelet, per-window spectral to batch computation
+2. **Fix Pool subprocess hang** — move imports from worker function to module level
+3. **Implement cross-validation** — 5-fold temporal CV
+4. **Hyperparameter optimization** — Optuna for CatBoost/XGBoost/LightGBM
+5. **Ensemble methods** — stack GBDT + CNN-LSTM + Transformer
+6. **Train Transformer** — with Neupert physics-informed loss
+7. **Train MAE** — self-supervised pretraining on 724 days
+8. **Run full pipeline on all 724 days** — with proper resume and periodic saves
+
+### GPU Specifications
+
+| Component | Spec |
+|-----------|------|
+| GPU | NVIDIA A100 80GB PCIe |
+| Memory | 79.3 GB usable |
+| CUDA | 13.0 (CUDA Driver 610.43.02) |
+| PyTorch | 2.12.1+cu130 |
+| CPU | 24 cores @ 2.0 GHz |
+| RAM | 125 GB |
+| VRAM used (200-day chunk) | 15.67 GB |
